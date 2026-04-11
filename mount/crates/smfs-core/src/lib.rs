@@ -2,7 +2,8 @@
 //!
 //! This crate holds everything interesting about supermemoryfs:
 //!
-//! - [`vfs`] — the `FileSystem` trait and supporting types (inode model, errors, path helpers).
+//! - [`vfs`] — the `FileSystem` trait, `MemFs` reference implementation, and
+//!   supporting types (`FileAttr`, `VfsError`, path helpers, POSIX mode constants).
 //! - [`cache`] — local SQLite cache with AgentFS-compatible schema plus supermemoryfs extensions.
 //! - [`mount`] — FUSE (Linux) and NFS (macOS) mount adapters wrapping vendored `fuser`/`nfsserve`.
 //! - [`sync`] — background sync engine that reconciles the local cache with the Supermemory API.

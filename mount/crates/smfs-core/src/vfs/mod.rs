@@ -1,25 +1,37 @@
-//! Virtual filesystem trait and data model.
+//! Virtual filesystem trait and in-memory reference implementation.
 //!
-//! Every filesystem operation supermemoryfs supports is defined here as an
-//! async trait method. Mount adapters (FUSE, NFS) translate kernel callbacks
-//! into trait method calls; storage backends (in-memory for tests, SQLite for
-//! production) implement the trait.
+//! This is the single source of truth for what a filesystem operation looks
+//! like in supermemoryfs. The [`FileSystem`] trait is implemented by every
+//! backend ([`MemFs`] in this crate, `SupermemoryFs` in M5) and called by
+//! every frontend (FUSE and NFS mount adapters in M3).
 //!
-//! Keeping this module free of FUSE/NFS/SQLite concerns is deliberate — it
-//! means the trait is the single source of truth for filesystem semantics, and
-//! the same contract can be exercised against any backend without touching
-//! mount code.
+//! ## Module layout
 //!
-//! ## Planned contents (M2)
+//! - [`traits`] — the [`FileSystem`] and [`File`] traits
+//! - [`types`] — [`FileAttr`], [`DirEntry`], [`FilesystemStats`], [`SetAttr`],
+//!   [`TimeOrNow`], [`Timestamp`], [`FileType`]
+//! - [`mode`] — POSIX mode constants ([`S_IFMT`], [`S_IFREG`], etc.)
+//! - [`error`] — [`VfsError`] with `to_errno()` and [`VfsResult<T>`]
+//! - [`path`] — path normalization helpers
+//! - [`mem`] — [`MemFs`], the in-memory reference implementation, plus its
+//!   conformance test suite
 //!
-//! - `Inode`, `FileAttr`, `FileType`, `SetAttr`, `DirEntry` data types
-//! - `VfsError` with an `errno` mapping
-//! - Path normalization helpers (reject `..` escapes, strip redundant separators)
-//! - `pub trait FileSystem` with: `lookup`, `getattr`, `setattr`, `readdir`,
-//!   `read`, `write`, `create`, `unlink`, `mkdir`, `rmdir`, `rename`
-//! - `MemVfs` — an in-memory reference implementation used by tests and by
-//!   M4's first real mount demo
-//!
-//! See `.plan/v0-plan.md` milestone M2 for the detailed spec.
+//! Backends depend on `vfs`, never the other way around. Keeping this module
+//! free of kernel, SQLite, and network concerns is deliberate — it means the
+//! trait is the single definition point for filesystem semantics.
 
-// TODO(M2): implement per module doc comment above.
+pub mod error;
+pub mod mem;
+pub mod mode;
+pub mod path;
+pub mod traits;
+pub mod types;
+
+pub use error::{VfsError, VfsResult};
+pub use mem::MemFs;
+pub use mode::{
+    DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, DEFAULT_SYMLINK_MODE, MAX_NAME_LEN, PREFERRED_BLOCK_SIZE,
+    S_IFDIR, S_IFLNK, S_IFMT, S_IFREG,
+};
+pub use traits::{BoxedFile, File, FileSystem};
+pub use types::{DirEntry, FileAttr, FileType, FilesystemStats, SetAttr, TimeOrNow, Timestamp};

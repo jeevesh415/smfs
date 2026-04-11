@@ -18,8 +18,8 @@
 //! - `Db` type backed by an `r2d2` SQLite connection pool in WAL mode
 //! - Inode CRUD methods, chunked read/write, remote-mapping helpers,
 //!   sync-queue helpers
-//! - `SmfsVfs` — the real `FileSystem` implementation that backs the mount
-//!   once the cache exists
+//! - `SupermemoryFs` — the real `FileSystem` implementation that backs the
+//!   mount once the cache exists
 //!
 //! See `.plan/v0-plan.md` milestone M5 for the detailed spec.
 
