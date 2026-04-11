@@ -1,0 +1,21 @@
+[package]
+name = "smfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "supermemoryfs CLI — mount your Supermemory container as a local filesystem"
+
+[[bin]]
+name = "smfs"
+path = "src/main.rs"
+
+[dependencies]
+smfs-core = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
