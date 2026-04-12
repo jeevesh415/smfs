@@ -30,5 +30,6 @@ Thumbs.db
 .env.local
 
 .plan/
+.claude/
 docs/
 README.md

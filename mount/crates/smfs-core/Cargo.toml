@@ -23,6 +23,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 libc = { workspace = true }
+rusqlite = { workspace = true }
+directories = { workspace = true }
+lru = { workspace = true }
 
 # Mount backends — target-gated (M3a)
 # nfsserve compiles on both macOS and Linux (pure Rust).

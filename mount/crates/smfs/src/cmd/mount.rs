@@ -36,8 +36,8 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    use smfs_core::cache::{Db, SupermemoryFs};
     use smfs_core::mount::{mount_fs, MountBackend, MountOpts};
-    use smfs_core::vfs::MemFs;
     use std::sync::Arc;
 
     // 1. Parse backend (or use OS default).
@@ -58,8 +58,13 @@ pub async fn run(args: Args) -> Result<()> {
     // 4. Build MountOpts.
     let opts = MountOpts::new(args.path.clone(), backend).with_ownership(uid, gid);
 
-    // 5. Create MemFs and mount.
-    let fs = Arc::new(MemFs::new());
+    // 5. Open SQLite cache and create SupermemoryFs.
+    let db_path = smfs_core::config::cache_db_path(&args.container_tag);
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let db = Arc::new(Db::open(&db_path)?);
+    let fs = Arc::new(SupermemoryFs::new(db));
     let handle = mount_fs(fs, opts).await?;
 
     eprintln!(

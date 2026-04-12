@@ -2,25 +2,18 @@
 //!
 //! Persists inodes, dentries, file chunks, and sync state between daemon
 //! restarts. Schema is adapted from the AgentFS agent filesystem spec
-//! (see `agentfs/SPEC.md`) with supermemoryfs-specific additions for
-//! remote document mapping and a durable sync queue.
+//! with supermemoryfs-specific additions.
 //!
 //! The cache is a *passive store*: it never calls the API or spawns
 //! background tasks. The sync engine (in [`crate::sync`]) is the only
-//! thing that mutates sync-state fields.
-//!
-//! ## Planned contents (M5)
-//!
-//! - `schema.sql` embedded via `include_str!` covering:
-//!   - AgentFS tables: `fs_config`, `fs_inode`, `fs_dentry`, `fs_data`, `fs_symlink`, `kv_store`
-//!   - supermemoryfs extensions: `fs_remote`, `fs_dir_cache`, `sync_queue`
-//!   - `schema_version` for forward migrations
-//! - `Db` type backed by an `r2d2` SQLite connection pool in WAL mode
-//! - Inode CRUD methods, chunked read/write, remote-mapping helpers,
-//!   sync-queue helpers
-//! - `SupermemoryFs` — the real `FileSystem` implementation that backs the
-//!   mount once the cache exists
-//!
-//! See `.plan/v0-plan.md` milestone M5 for the detailed spec.
+//! thing that mutates sync-state fields (added in M7–M8).
 
-// TODO(M5): implement per module doc comment above.
+mod db;
+mod file;
+mod fs;
+
+pub use db::{Db, DEFAULT_CHUNK_SIZE, DENTRY_CACHE_MAX, ROOT_INO};
+pub use fs::SupermemoryFs;
+
+#[cfg(test)]
+mod tests;

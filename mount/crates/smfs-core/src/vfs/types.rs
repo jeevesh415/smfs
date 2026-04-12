@@ -147,6 +147,42 @@ impl FileAttr {
         }
     }
 
+    /// Construct a file attr with explicit mode and timestamp (used by SQLite backend).
+    pub fn new_file_with(ino: u64, mode: u32, uid: u32, gid: u32, ts: Timestamp) -> Self {
+        Self {
+            ino,
+            mode,
+            nlink: 1,
+            uid,
+            gid,
+            size: 0,
+            blocks: 0,
+            atime: ts,
+            mtime: ts,
+            ctime: ts,
+            rdev: 0,
+            blksize: PREFERRED_BLOCK_SIZE,
+        }
+    }
+
+    /// Construct a directory attr with explicit mode and timestamp (used by SQLite backend).
+    pub fn new_dir_with(ino: u64, mode: u32, uid: u32, gid: u32, ts: Timestamp) -> Self {
+        Self {
+            ino,
+            mode,
+            nlink: 2,
+            uid,
+            gid,
+            size: 0,
+            blocks: 0,
+            atime: ts,
+            mtime: ts,
+            ctime: ts,
+            rdev: 0,
+            blksize: PREFERRED_BLOCK_SIZE,
+        }
+    }
+
     /// Derive the file type from the mode bits.
     pub fn file_type(&self) -> FileType {
         match self.mode & S_IFMT {
