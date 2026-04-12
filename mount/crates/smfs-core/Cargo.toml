@@ -23,3 +23,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 libc = { workspace = true }
+
+# Mount backends — target-gated (M3a)
+# nfsserve compiles on both macOS and Linux (pure Rust).
+# fuser is Linux-only because on macOS it would require macFUSE,
+# which we deliberately avoid by using NFSv3-over-localhost instead.
+[target.'cfg(unix)'.dependencies]
+nfsserve = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { workspace = true }
