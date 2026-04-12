@@ -4,7 +4,7 @@
 //! [`smfs_core`] library — this file parses arguments, initializes logging,
 //! and hands control to the appropriate command handler.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use anyhow::Result;
 use clap::Parser;

@@ -5,7 +5,7 @@
 //! user's stored credentials and execs this subcommand with `--token`.
 //! It can also be used directly for scripting or debugging.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::Args as ClapArgs;
 use std::path::PathBuf;
 
@@ -35,6 +35,43 @@ pub struct Args {
     pub api_url: Option<String>,
 }
 
-pub async fn run(_args: Args) -> Result<()> {
-    bail!("`smfs mount` not implemented yet (first real mount lands in M4; wired to SQLite + API in M5–M6)")
+pub async fn run(args: Args) -> Result<()> {
+    use smfs_core::mount::{mount_fs, MountBackend, MountOpts};
+    use smfs_core::vfs::MemFs;
+    use std::sync::Arc;
+
+    // 1. Parse backend (or use OS default).
+    let backend = match &args.backend {
+        Some(b) => b.parse::<MountBackend>()?,
+        None => MountBackend::default(),
+    };
+
+    // 2. Create mountpoint if it doesn't exist.
+    if !args.path.exists() {
+        std::fs::create_dir_all(&args.path)?;
+    }
+
+    // 3. Get effective uid/gid of the calling user.
+    #[allow(unsafe_code)]
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+
+    // 4. Build MountOpts.
+    let opts = MountOpts::new(args.path.clone(), backend).with_ownership(uid, gid);
+
+    // 5. Create MemFs and mount.
+    let fs = Arc::new(MemFs::new());
+    let handle = mount_fs(fs, opts).await?;
+
+    eprintln!(
+        "supermemoryfs mounted at {} (backend: {}, ctrl+c to unmount)",
+        handle.mountpoint().display(),
+        handle.backend(),
+    );
+
+    // 6. Hold mount until Ctrl+C.
+    tokio::signal::ctrl_c().await?;
+    eprintln!("\nunmounting...");
+
+    drop(handle);
+    Ok(())
 }
