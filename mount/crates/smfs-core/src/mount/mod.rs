@@ -189,10 +189,6 @@ pub struct MountHandle {
 }
 
 /// Backend-specific state kept alive while the mount exists.
-///
-/// The variants grow as backends land: `Stub` is a test-only placeholder.
-/// M3d adds `Nfs { server_handle }`. M3f adds `Fuse { session }`.
-#[derive(Debug)]
 #[non_exhaustive]
 pub(crate) enum MountHandleInner {
     /// Test-only placeholder. Constructed by unit tests that need a
@@ -208,6 +204,24 @@ pub(crate) enum MountHandleInner {
     Nfs {
         server_handle: tokio::task::JoinHandle<()>,
     },
+
+    /// Live FUSE mount. `session` owns the fuser daemon threads and the
+    /// kernel mount. Dropping it calls `fusermount3 -u` automatically.
+    #[cfg(target_os = "linux")]
+    Fuse { session: fuser::BackgroundSession },
+}
+
+// Manual Debug because fuser::BackgroundSession may not impl Debug.
+impl std::fmt::Debug for MountHandleInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stub => write!(f, "Stub"),
+            #[cfg(unix)]
+            Self::Nfs { .. } => f.debug_struct("Nfs").finish_non_exhaustive(),
+            #[cfg(target_os = "linux")]
+            Self::Fuse { .. } => f.debug_struct("Fuse").finish_non_exhaustive(),
+        }
+    }
 }
 
 impl MountHandle {
@@ -236,6 +250,24 @@ impl MountHandle {
             backend: MountBackend::Nfs,
             lazy_unmount,
             inner: MountHandleInner::Nfs { server_handle },
+        }
+    }
+
+    /// Construct a `MountHandle` for a newly-created FUSE mount.
+    ///
+    /// Private constructor used by [`fuse::mount_fuse`]. Outside callers
+    /// should go through [`mount_fs`].
+    #[cfg(target_os = "linux")]
+    pub(super) fn new_fuse(
+        mountpoint: PathBuf,
+        lazy_unmount: bool,
+        session: fuser::BackgroundSession,
+    ) -> Self {
+        Self {
+            mountpoint,
+            backend: MountBackend::Fuse,
+            lazy_unmount,
+            inner: MountHandleInner::Fuse { session },
         }
     }
 }
@@ -269,6 +301,15 @@ impl Drop for MountHandle {
                 tracing::debug!(
                     mountpoint = %self.mountpoint.display(),
                     "NFS mount handle dropped"
+                );
+            }
+            #[cfg(target_os = "linux")]
+            MountHandleInner::Fuse { .. } => {
+                // BackgroundSession::Drop calls fusermount3 -u automatically.
+                // cwd already moved to "/" above. Session drops when self drops.
+                tracing::debug!(
+                    mountpoint = %self.mountpoint.display(),
+                    "FUSE mount handle dropped"
                 );
             }
         }
