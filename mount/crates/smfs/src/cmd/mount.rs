@@ -64,7 +64,18 @@ pub async fn run(args: Args) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let db = Arc::new(Db::open(&db_path)?);
-    let fs = Arc::new(SupermemoryFs::new(db));
+
+    let fs = Arc::new(match &args.token {
+        Some(token) => {
+            let api = Arc::new(smfs_core::api::ApiClient::new(
+                args.api_url.as_deref().unwrap_or("https://api.supermemory.ai"),
+                token,
+                &args.container_tag,
+            ));
+            SupermemoryFs::with_api(db, api)
+        }
+        None => SupermemoryFs::new(db),
+    });
     let handle = mount_fs(fs, opts).await?;
 
     eprintln!(

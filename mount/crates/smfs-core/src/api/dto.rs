@@ -52,6 +52,8 @@ pub struct ListDocumentsReq {
     pub filepath: Option<String>,
     pub limit: u32,
     pub page: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_content: Option<bool>,
 }
 
 /// Response from POST /v3/documents/list

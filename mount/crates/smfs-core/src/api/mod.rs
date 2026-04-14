@@ -65,6 +65,7 @@ impl ApiClient {
                 filepath: filepath.map(String::from),
                 limit: 100,
                 page,
+                include_content: Some(true),
             };
 
             let resp: ListDocumentsResp = self

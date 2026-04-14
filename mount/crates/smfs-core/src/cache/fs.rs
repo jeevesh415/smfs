@@ -21,16 +21,264 @@ use crate::vfs::types::{DirEntry, FileAttr, FilesystemStats, SetAttr, TimeOrNow,
 /// a SQLite database on disk and survives process restarts.
 pub struct SupermemoryFs {
     db: Arc<Db>,
+    api: Option<Arc<crate::api::ApiClient>>,
     dentry_cache: Mutex<LruCache<(u64, String), u64>>,
 }
 
 impl SupermemoryFs {
-    /// Create a new `SupermemoryFs` wrapping an already-opened database.
+    /// Create a new `SupermemoryFs` wrapping an already-opened database (offline mode).
     pub fn new(db: Arc<Db>) -> Self {
         Self {
             db,
+            api: None,
             dentry_cache: Mutex::new(LruCache::new(NonZeroUsize::new(DENTRY_CACHE_MAX).unwrap())),
         }
+    }
+
+    /// Create a `SupermemoryFs` with an API client for cloud sync.
+    pub fn with_api(db: Arc<Db>, api: Arc<crate::api::ApiClient>) -> Self {
+        Self {
+            db,
+            api: Some(api),
+            dentry_cache: Mutex::new(LruCache::new(NonZeroUsize::new(DENTRY_CACHE_MAX).unwrap())),
+        }
+    }
+
+    /// Reconstruct the full filepath for an inode by walking dentries to root.
+    fn resolve_filepath(&self, ino: u64) -> Option<String> {
+        if ino == super::db::ROOT_INO {
+            return Some("/".to_string());
+        }
+
+        let conn = self.db.conn.lock();
+        let mut parts = Vec::new();
+        let mut current = ino;
+
+        loop {
+            if current == super::db::ROOT_INO {
+                break;
+            }
+            let row: Option<(String, i64)> = conn
+                .query_row(
+                    "SELECT name, parent_ino FROM fs_dentry WHERE ino = ?1",
+                    [current as i64],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            match row {
+                Some((name, parent_ino)) => {
+                    parts.push(name);
+                    current = parent_ino as u64;
+                }
+                None => return None,
+            }
+        }
+
+        parts.reverse();
+        Some(format!("/{}", parts.join("/")))
+    }
+
+    /// Ensure a directory path exists in the cache, creating intermediate dirs as needed.
+    /// Returns the inode of the deepest directory.
+    fn ensure_dirs(&self, path: &str) -> VfsResult<u64> {
+        let conn = self.db.conn.lock();
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut parent_ino = super::db::ROOT_INO;
+
+        for part in &parts {
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT ino FROM fs_dentry WHERE parent_ino = ?1 AND name = ?2",
+                    rusqlite::params![parent_ino as i64, part],
+                    |r| r.get(0),
+                )
+                .ok();
+
+            if let Some(ino) = existing {
+                parent_ino = ino as u64;
+            } else {
+                let now = Timestamp::now();
+                conn.execute(
+                    "INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec)
+                     VALUES (?1, 2, 0, 0, 0, ?2, ?2, ?2, 0, ?3, ?3, ?3)",
+                    rusqlite::params![
+                        (S_IFDIR | 0o755) as i64,
+                        now.sec,
+                        now.nsec as i64,
+                    ],
+                )
+                .map_err(sql_err)?;
+                let new_ino = conn.last_insert_rowid() as u64;
+
+                conn.execute(
+                    "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![part, parent_ino as i64, new_ino as i64],
+                )
+                .map_err(sql_err)?;
+
+                // Update parent nlink
+                conn.execute(
+                    "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?1",
+                    [parent_ino as i64],
+                )
+                .map_err(sql_err)?;
+
+                self.dentry_cache
+                    .lock()
+                    .put((parent_ino, part.to_string()), new_ino);
+
+                parent_ino = new_ino;
+            }
+        }
+
+        Ok(parent_ino)
+    }
+
+    /// Query directory entries from the database.
+    fn query_dir_entries(
+        &self,
+        conn: &rusqlite::Connection,
+        parent_ino: u64,
+    ) -> VfsResult<Vec<DirEntry>> {
+        let mut stmt = conn
+            .prepare_cached(&format!(
+                "SELECT d.name, i.{INODE_COLS}
+                 FROM fs_dentry d JOIN fs_inode i ON d.ino = i.ino
+                 WHERE d.parent_ino = ?1
+                 ORDER BY d.name"
+            ))
+            .map_err(sql_err)?;
+
+        let entries: Vec<DirEntry> = stmt
+            .query_map([parent_ino as i64], |row| {
+                let name: String = row.get(0)?;
+                let attr = FileAttr {
+                    ino: row.get::<_, i64>(1)? as u64,
+                    mode: row.get::<_, i64>(2)? as u32,
+                    nlink: row.get::<_, i64>(3)? as u32,
+                    uid: row.get::<_, i64>(4)? as u32,
+                    gid: row.get::<_, i64>(5)? as u32,
+                    size: row.get::<_, i64>(6)? as u64,
+                    blocks: (row.get::<_, i64>(6)? as u64).div_ceil(512),
+                    atime: Timestamp {
+                        sec: row.get(7)?,
+                        nsec: row.get::<_, i64>(11)? as u32,
+                    },
+                    mtime: Timestamp {
+                        sec: row.get(8)?,
+                        nsec: row.get::<_, i64>(12)? as u32,
+                    },
+                    ctime: Timestamp {
+                        sec: row.get(9)?,
+                        nsec: row.get::<_, i64>(13)? as u32,
+                    },
+                    rdev: row.get::<_, i64>(10)? as u32,
+                    blksize: crate::vfs::PREFERRED_BLOCK_SIZE,
+                };
+                Ok(DirEntry { name, attr })
+            })
+            .map_err(sql_err)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Pull documents from the API and insert them into the local cache.
+    async fn pull_documents(&self, filepath_prefix: &str) -> VfsResult<()> {
+        let api = match &self.api {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+
+        let docs = api
+            .list_documents(Some(filepath_prefix))
+            .await
+            .map_err(|e| VfsError::Io(std::io::Error::other(e.to_string())))?;
+
+        for doc in &docs {
+            let filepath = match &doc.filepath {
+                Some(fp) => fp,
+                None => continue,
+            };
+
+            // Split filepath into directory + filename
+            let (dir, filename) = match filepath.rfind('/') {
+                Some(pos) => {
+                    let dir = if pos == 0 { "/" } else { &filepath[..pos] };
+                    let name = &filepath[pos + 1..];
+                    (dir, name)
+                }
+                None => continue,
+            };
+
+            if filename.is_empty() {
+                continue;
+            }
+
+            // Ensure parent directories exist
+            let parent_ino = self.ensure_dirs(dir)?;
+
+            // Check if file already exists in cache
+            {
+                let conn = self.db.conn.lock();
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM fs_dentry WHERE parent_ino = ?1 AND name = ?2",
+                        rusqlite::params![parent_ino as i64, filename],
+                        |_| Ok(()),
+                    )
+                    .is_ok();
+                if exists {
+                    continue;
+                }
+            }
+
+            // Create file inode
+            let content = doc.content.as_deref().unwrap_or("");
+            let size = content.len() as i64;
+            let now = Timestamp::now();
+
+            let conn = self.db.conn.lock();
+            conn.execute(
+                "INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec)
+                 VALUES (?1, 1, 0, 0, ?2, ?3, ?3, ?3, 0, ?4, ?4, ?4)",
+                rusqlite::params![
+                    (S_IFREG | 0o644) as i64,
+                    size,
+                    now.sec,
+                    now.nsec as i64,
+                ],
+            )
+            .map_err(sql_err)?;
+            let file_ino = conn.last_insert_rowid() as u64;
+
+            // Create dentry
+            conn.execute(
+                "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?1, ?2, ?3)",
+                rusqlite::params![filename, parent_ino as i64, file_ino as i64],
+            )
+            .map_err(sql_err)?;
+
+            // Store content as chunks
+            if !content.is_empty() {
+                let chunk_size = self.db.chunk_size;
+                let bytes = content.as_bytes();
+                for (i, chunk_data) in bytes.chunks(chunk_size).enumerate() {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO fs_data (ino, chunk_index, data) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![file_ino as i64, i as i64, chunk_data],
+                    )
+                    .map_err(sql_err)?;
+                }
+            }
+
+            self.dentry_cache
+                .lock()
+                .put((parent_ino, filename.to_string()), file_ino);
+        }
+
+        Ok(())
     }
 }
 
@@ -65,63 +313,107 @@ const INODE_COLS: &str =
 impl FileSystem for SupermemoryFs {
     async fn lookup(&self, parent_ino: u64, name: &str) -> VfsResult<Option<FileAttr>> {
         validate_name(name)?;
-        let conn = self.db.conn.lock();
 
-        // Verify parent is a directory.
-        let parent_mode: i64 = conn
-            .query_row(
-                "SELECT mode FROM fs_inode WHERE ino = ?1",
-                [parent_ino as i64],
-                |r| r.get(0),
-            )
-            .map_err(|_| VfsError::NotFound)?;
-        if (parent_mode as u32 & S_IFMT) != S_IFDIR {
-            return Err(VfsError::NotADirectory);
-        }
+        // All DB work in a sync block — conn must be dropped before any .await.
+        let result = {
+            let conn = self.db.conn.lock();
 
-        // Check dentry cache.
-        {
-            let mut cache = self.dentry_cache.lock();
-            if let Some(&child_ino) = cache.get(&(parent_ino, name.to_string())) {
-                drop(cache);
+            // Verify parent is a directory.
+            let parent_mode: i64 = conn
+                .query_row(
+                    "SELECT mode FROM fs_inode WHERE ino = ?1",
+                    [parent_ino as i64],
+                    |r| r.get(0),
+                )
+                .map_err(|_| VfsError::NotFound)?;
+            if (parent_mode as u32 & S_IFMT) != S_IFDIR {
+                return Err(VfsError::NotADirectory);
+            }
+
+            // Check dentry cache.
+            {
+                let mut cache = self.dentry_cache.lock();
+                if let Some(&child_ino) = cache.get(&(parent_ino, name.to_string())) {
+                    drop(cache);
+                    let attr = conn
+                        .query_row(
+                            &format!("SELECT {INODE_COLS} FROM fs_inode WHERE ino = ?1"),
+                            [child_ino as i64],
+                            Db::row_to_attr,
+                        )
+                        .ok();
+                    return Ok(attr);
+                }
+            }
+
+            // Cache miss — query dentry table.
+            let child_ino: Option<i64> = conn
+                .query_row(
+                    "SELECT ino FROM fs_dentry WHERE parent_ino = ?1 AND name = ?2",
+                    rusqlite::params![parent_ino as i64, name],
+                    |r| r.get(0),
+                )
+                .ok();
+
+            if let Some(child_ino) = child_ino {
+                self.dentry_cache
+                    .lock()
+                    .put((parent_ino, name.to_string()), child_ino as u64);
+
                 let attr = conn
                     .query_row(
                         &format!("SELECT {INODE_COLS} FROM fs_inode WHERE ino = ?1"),
-                        [child_ino as i64],
+                        [child_ino],
                         Db::row_to_attr,
                     )
                     .ok();
+
                 return Ok(attr);
+            }
+
+            None::<FileAttr>
+        }; // conn dropped here
+
+        if result.is_some() {
+            return Ok(result);
+        }
+
+        // Not in local cache — try API pull.
+        if self.api.is_some() {
+            if let Some(parent_path) = self.resolve_filepath(parent_ino) {
+                let sep = if parent_path.ends_with('/') { "" } else { "/" };
+                let file_path = format!("{parent_path}{sep}{name}");
+                let _ = self.pull_documents(&file_path).await;
+
+                // Retry from cache.
+                let conn = self.db.conn.lock();
+                let child_ino: Option<i64> = conn
+                    .query_row(
+                        "SELECT ino FROM fs_dentry WHERE parent_ino = ?1 AND name = ?2",
+                        rusqlite::params![parent_ino as i64, name],
+                        |r| r.get(0),
+                    )
+                    .ok();
+
+                if let Some(child_ino) = child_ino {
+                    self.dentry_cache
+                        .lock()
+                        .put((parent_ino, name.to_string()), child_ino as u64);
+
+                    let attr = conn
+                        .query_row(
+                            &format!("SELECT {INODE_COLS} FROM fs_inode WHERE ino = ?1"),
+                            [child_ino],
+                            Db::row_to_attr,
+                        )
+                        .ok();
+
+                    return Ok(attr);
+                }
             }
         }
 
-        // Cache miss — query dentry table.
-        let child_ino: Option<i64> = conn
-            .query_row(
-                "SELECT ino FROM fs_dentry WHERE parent_ino = ?1 AND name = ?2",
-                rusqlite::params![parent_ino as i64, name],
-                |r| r.get(0),
-            )
-            .ok();
-
-        let Some(child_ino) = child_ino else {
-            return Ok(None);
-        };
-
-        // Populate cache.
-        self.dentry_cache
-            .lock()
-            .put((parent_ino, name.to_string()), child_ino as u64);
-
-        let attr = conn
-            .query_row(
-                &format!("SELECT {INODE_COLS} FROM fs_inode WHERE ino = ?1"),
-                [child_ino],
-                Db::row_to_attr,
-            )
-            .ok();
-
-        Ok(attr)
+        Ok(None)
     }
 
     async fn getattr(&self, ino: u64) -> VfsResult<Option<FileAttr>> {
@@ -175,95 +467,104 @@ impl FileSystem for SupermemoryFs {
     }
 
     async fn readdir(&self, ino: u64) -> VfsResult<Option<Vec<String>>> {
-        let conn = self.db.conn.lock();
+        // All DB work in a sync block so conn/stmt are dropped before any .await.
+        let names = {
+            let conn = self.db.conn.lock();
 
-        // Check inode exists and is a directory.
-        let mode: Option<i64> = conn
-            .query_row(
-                "SELECT mode FROM fs_inode WHERE ino = ?1",
-                [ino as i64],
-                |r| r.get(0),
-            )
-            .ok();
-        let Some(mode) = mode else {
-            return Ok(None);
-        };
-        if (mode as u32 & S_IFMT) != S_IFDIR {
-            return Ok(None);
+            let mode: Option<i64> = conn
+                .query_row(
+                    "SELECT mode FROM fs_inode WHERE ino = ?1",
+                    [ino as i64],
+                    |r| r.get(0),
+                )
+                .ok();
+            let Some(mode) = mode else {
+                return Ok(None);
+            };
+            if (mode as u32 & S_IFMT) != S_IFDIR {
+                return Ok(None);
+            }
+
+            let mut stmt = conn
+                .prepare_cached("SELECT name FROM fs_dentry WHERE parent_ino = ?1 ORDER BY name")
+                .map_err(sql_err)?;
+            let names: Vec<String> = stmt
+                .query_map([ino as i64], |r| r.get(0))
+                .map_err(sql_err)?
+                .filter_map(|r| r.ok())
+                .collect();
+            names
+        }; // conn + stmt dropped here
+
+        if !names.is_empty() || self.api.is_none() {
+            return Ok(Some(names));
         }
 
-        let mut stmt = conn
-            .prepare_cached("SELECT name FROM fs_dentry WHERE parent_ino = ?1 ORDER BY name")
-            .map_err(sql_err)?;
-        let names: Vec<String> = stmt
-            .query_map([ino as i64], |r| r.get(0))
-            .map_err(sql_err)?
-            .filter_map(|r| r.ok())
-            .collect();
+        // Empty directory — try API pull.
+        if let Some(dir_path) = self.resolve_filepath(ino) {
+            let prefix = if dir_path.ends_with('/') {
+                dir_path
+            } else {
+                format!("{dir_path}/")
+            };
+            let _ = self.pull_documents(&prefix).await;
 
-        Ok(Some(names))
+            let conn = self.db.conn.lock();
+            let mut stmt = conn
+                .prepare_cached("SELECT name FROM fs_dentry WHERE parent_ino = ?1 ORDER BY name")
+                .map_err(sql_err)?;
+            let names: Vec<String> = stmt
+                .query_map([ino as i64], |r| r.get(0))
+                .map_err(sql_err)?
+                .filter_map(|r| r.ok())
+                .collect();
+            return Ok(Some(names));
+        }
+
+        Ok(Some(Vec::new()))
     }
 
     async fn readdir_plus(&self, ino: u64) -> VfsResult<Option<Vec<DirEntry>>> {
-        let conn = self.db.conn.lock();
+        // First pass: query from local cache. All DB work in one sync block.
+        let entries = {
+            let conn = self.db.conn.lock();
 
-        let mode: Option<i64> = conn
-            .query_row(
-                "SELECT mode FROM fs_inode WHERE ino = ?1",
-                [ino as i64],
-                |r| r.get(0),
-            )
-            .ok();
-        let Some(mode) = mode else {
-            return Ok(None);
-        };
-        if (mode as u32 & S_IFMT) != S_IFDIR {
-            return Ok(None);
+            let mode: Option<i64> = conn
+                .query_row(
+                    "SELECT mode FROM fs_inode WHERE ino = ?1",
+                    [ino as i64],
+                    |r| r.get(0),
+                )
+                .ok();
+            let Some(mode) = mode else {
+                return Ok(None);
+            };
+            if (mode as u32 & S_IFMT) != S_IFDIR {
+                return Ok(None);
+            }
+
+            self.query_dir_entries(&conn, ino)?
+        }; // conn dropped here
+
+        if !entries.is_empty() || self.api.is_none() {
+            return Ok(Some(entries));
         }
 
-        let mut stmt = conn
-            .prepare_cached(&format!(
-                "SELECT d.name, i.{INODE_COLS}
-                 FROM fs_dentry d JOIN fs_inode i ON d.ino = i.ino
-                 WHERE d.parent_ino = ?1
-                 ORDER BY d.name"
-            ))
-            .map_err(sql_err)?;
+        // Empty directory — try API pull.
+        if let Some(dir_path) = self.resolve_filepath(ino) {
+            let prefix = if dir_path.ends_with('/') {
+                dir_path
+            } else {
+                format!("{dir_path}/")
+            };
+            let _ = self.pull_documents(&prefix).await;
 
-        let entries: Vec<DirEntry> = stmt
-            .query_map([ino as i64], |row| {
-                let name: String = row.get(0)?;
-                // Column indices shifted by 1 because name is column 0.
-                let attr = FileAttr {
-                    ino: row.get::<_, i64>(1)? as u64,
-                    mode: row.get::<_, i64>(2)? as u32,
-                    nlink: row.get::<_, i64>(3)? as u32,
-                    uid: row.get::<_, i64>(4)? as u32,
-                    gid: row.get::<_, i64>(5)? as u32,
-                    size: row.get::<_, i64>(6)? as u64,
-                    blocks: (row.get::<_, i64>(6)? as u64).div_ceil(512),
-                    atime: Timestamp {
-                        sec: row.get(7)?,
-                        nsec: row.get::<_, i64>(11)? as u32,
-                    },
-                    mtime: Timestamp {
-                        sec: row.get(8)?,
-                        nsec: row.get::<_, i64>(12)? as u32,
-                    },
-                    ctime: Timestamp {
-                        sec: row.get(9)?,
-                        nsec: row.get::<_, i64>(13)? as u32,
-                    },
-                    rdev: row.get::<_, i64>(10)? as u32,
-                    blksize: crate::vfs::PREFERRED_BLOCK_SIZE,
-                };
-                Ok(DirEntry { name, attr })
-            })
-            .map_err(sql_err)?
-            .filter_map(|r| r.ok())
-            .collect();
+            let conn = self.db.conn.lock();
+            let entries = self.query_dir_entries(&conn, ino)?;
+            return Ok(Some(entries));
+        }
 
-        Ok(Some(entries))
+        Ok(Some(Vec::new()))
     }
 
     async fn mkdir(
