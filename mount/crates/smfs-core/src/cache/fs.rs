@@ -458,6 +458,8 @@ impl FileSystem for SupermemoryFs {
             let file = SqliteFile {
                 db: self.db.clone(),
                 ino,
+                api: None,
+                filepath: None,
             };
             file.truncate(attr.size.unwrap()).await?;
         }
@@ -708,26 +710,32 @@ impl FileSystem for SupermemoryFs {
     }
 
     async fn open(&self, ino: u64, _flags: i32) -> VfsResult<BoxedFile> {
-        let conn = self.db.conn.lock();
-        let mode: i64 = conn
-            .query_row(
-                "SELECT mode FROM fs_inode WHERE ino = ?1",
-                [ino as i64],
-                |r| r.get(0),
-            )
-            .map_err(|_| VfsError::NotFound)?;
+        {
+            let conn = self.db.conn.lock();
+            let mode: i64 = conn
+                .query_row(
+                    "SELECT mode FROM fs_inode WHERE ino = ?1",
+                    [ino as i64],
+                    |r| r.get(0),
+                )
+                .map_err(|_| VfsError::NotFound)?;
 
-        let ftype = mode as u32 & S_IFMT;
-        if ftype == S_IFDIR {
-            return Err(VfsError::IsADirectory);
-        }
-        if ftype == S_IFLNK {
-            return Err(VfsError::NotSupported);
-        }
+            let ftype = mode as u32 & S_IFMT;
+            if ftype == S_IFDIR {
+                return Err(VfsError::IsADirectory);
+            }
+            if ftype == S_IFLNK {
+                return Err(VfsError::NotSupported);
+            }
+        } // conn dropped before resolve_filepath
+
+        let filepath = self.resolve_filepath(ino);
 
         Ok(Arc::new(SqliteFile {
             db: self.db.clone(),
             ino,
+            api: self.api.clone(),
+            filepath,
         }))
     }
 
@@ -791,15 +799,24 @@ impl FileSystem for SupermemoryFs {
         .map_err(sql_err)?;
 
         tx.commit().map_err(sql_err)?;
+        drop(conn); // drop before resolve_filepath to avoid deadlock
 
         self.dentry_cache
             .lock()
             .put((parent_ino, name.to_string()), ino);
 
         let attr = FileAttr::new_file_with(ino, file_mode, uid, gid, now);
+
+        let filepath = self.resolve_filepath(parent_ino).map(|p| {
+            let sep = if p.ends_with('/') { "" } else { "/" };
+            format!("{p}{sep}{name}")
+        });
+
         let handle: BoxedFile = Arc::new(SqliteFile {
             db: self.db.clone(),
             ino,
+            api: self.api.clone(),
+            filepath,
         });
 
         Ok((attr, handle))

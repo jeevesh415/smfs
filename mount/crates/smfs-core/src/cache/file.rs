@@ -15,6 +15,8 @@ use crate::vfs::{FileAttr, Timestamp, VfsError, VfsResult};
 pub struct SqliteFile {
     pub(crate) db: Arc<Db>,
     pub(crate) ino: u64,
+    pub(crate) api: Option<Arc<crate::api::ApiClient>>,
+    pub(crate) filepath: Option<String>,
 }
 
 #[async_trait]
@@ -244,6 +246,36 @@ impl crate::vfs::File for SqliteFile {
 
     async fn flush(&self) -> VfsResult<()> {
         // SQLite writes are already durable after each transaction commit.
+        // If we have an API client, push the file content to the cloud.
+        let Some(api) = &self.api else { return Ok(()) };
+        let Some(filepath) = &self.filepath else { return Ok(()) };
+
+        let size: i64 = {
+            let conn = self.db.conn.lock();
+            conn.query_row(
+                "SELECT size FROM fs_inode WHERE ino = ?1",
+                [self.ino as i64],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        };
+
+        if size == 0 {
+            return Ok(());
+        }
+
+        let content = self.read(0, size as usize).await?;
+        let text = String::from_utf8_lossy(&content);
+
+        match api.create_document(&text, filepath).await {
+            Ok(resp) => {
+                tracing::debug!(filepath, doc_id = %resp.id, "pushed to API");
+            }
+            Err(e) => {
+                tracing::warn!(filepath, error = %e, "failed to push to API");
+            }
+        }
+
         Ok(())
     }
 
