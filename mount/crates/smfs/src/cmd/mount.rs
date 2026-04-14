@@ -11,12 +11,13 @@ use std::path::PathBuf;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// Path where the filesystem should be mounted (must exist).
-    pub path: PathBuf,
-
     /// Supermemory container tag to mount. One mount per container tag;
     /// mounts cannot overlap or share a path.
     pub container_tag: String,
+
+    /// Mount path. Defaults to ./<container_tag>/ in the current directory.
+    #[arg(long)]
+    pub path: Option<PathBuf>,
 
     /// Mount backend (`fuse` or `nfs`). Defaults to `fuse` on Linux and `nfs` on macOS.
     #[arg(long)]
@@ -54,9 +55,14 @@ pub async fn run(args: Args) -> Result<()> {
         None => MountBackend::default(),
     };
 
-    // 2. Create mountpoint if it doesn't exist.
-    if !args.path.exists() {
-        std::fs::create_dir_all(&args.path)?;
+    // 2. Resolve mount path (default: ./<container_tag>/ in current directory).
+    let mount_path = args.path.unwrap_or_else(|| {
+        std::env::current_dir()
+            .expect("cannot determine current directory")
+            .join(&args.container_tag)
+    });
+    if !mount_path.exists() {
+        std::fs::create_dir_all(&mount_path)?;
     }
 
     // 3. Get effective uid/gid of the calling user.
@@ -64,7 +70,7 @@ pub async fn run(args: Args) -> Result<()> {
     let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
 
     // 4. Build MountOpts.
-    let opts = MountOpts::new(args.path.clone(), backend).with_ownership(uid, gid);
+    let opts = MountOpts::new(mount_path, backend).with_ownership(uid, gid);
 
     // 5. Open SQLite cache and create SupermemoryFs.
     let db = if args.ephemeral {
