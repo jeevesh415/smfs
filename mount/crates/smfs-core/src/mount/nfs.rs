@@ -265,6 +265,8 @@ impl<F: FileSystem + 'static> NFSFileSystem for NfsAdapter<F> {
             .write(offset, data)
             .await
             .map_err(|e| vfs_err_to_nfsstat3(&e))?;
+        // Flush to push content to the API (NFS has no close/release callback).
+        let _ = handle.flush().await;
         let attr = handle
             .getattr()
             .await
