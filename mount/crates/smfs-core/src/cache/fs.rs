@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use lru::LruCache;
 use parking_lot::Mutex;
 
-use super::db::{Db, DENTRY_CACHE_MAX};
+use super::db::{Db, DENTRY_CACHE_MAX, ROOT_INO};
 use super::file::SqliteFile;
+use super::profile::{ProfileFile, PROFILE_INO, PROFILE_NAME};
 use crate::vfs::error::{VfsError, VfsResult};
 use crate::vfs::mode::{MAX_NAME_LEN, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 use crate::vfs::traits::File as _; // bring truncate() into scope
@@ -314,6 +315,11 @@ impl FileSystem for SupermemoryFs {
     async fn lookup(&self, parent_ino: u64, name: &str) -> VfsResult<Option<FileAttr>> {
         validate_name(name)?;
 
+        // Virtual profile.md at root.
+        if parent_ino == ROOT_INO && name == PROFILE_NAME && self.api.is_some() {
+            return Ok(Some(ProfileFile::profile_attr()));
+        }
+
         // All DB work in a sync block — conn must be dropped before any .await.
         let result = {
             let conn = self.db.conn.lock();
@@ -417,6 +423,9 @@ impl FileSystem for SupermemoryFs {
     }
 
     async fn getattr(&self, ino: u64) -> VfsResult<Option<FileAttr>> {
+        if ino == PROFILE_INO && self.api.is_some() {
+            return Ok(Some(ProfileFile::profile_attr()));
+        }
         let conn = self.db.conn.lock();
         let attr = conn
             .query_row(
@@ -470,7 +479,7 @@ impl FileSystem for SupermemoryFs {
 
     async fn readdir(&self, ino: u64) -> VfsResult<Option<Vec<String>>> {
         // All DB work in a sync block so conn/stmt are dropped before any .await.
-        let names = {
+        let mut names = {
             let conn = self.db.conn.lock();
 
             let mode: Option<i64> = conn
@@ -499,6 +508,9 @@ impl FileSystem for SupermemoryFs {
         }; // conn + stmt dropped here
 
         if !names.is_empty() || self.api.is_none() {
+            if ino == ROOT_INO && self.api.is_some() && !names.contains(&PROFILE_NAME.to_string()) {
+                names.push(PROFILE_NAME.to_string());
+            }
             return Ok(Some(names));
         }
 
@@ -515,11 +527,14 @@ impl FileSystem for SupermemoryFs {
             let mut stmt = conn
                 .prepare_cached("SELECT name FROM fs_dentry WHERE parent_ino = ?1 ORDER BY name")
                 .map_err(sql_err)?;
-            let names: Vec<String> = stmt
+            let mut names: Vec<String> = stmt
                 .query_map([ino as i64], |r| r.get(0))
                 .map_err(sql_err)?
                 .filter_map(|r| r.ok())
                 .collect();
+            if ino == ROOT_INO && self.api.is_some() && !names.contains(&PROFILE_NAME.to_string()) {
+                names.push(PROFILE_NAME.to_string());
+            }
             return Ok(Some(names));
         }
 
@@ -548,8 +563,18 @@ impl FileSystem for SupermemoryFs {
             self.query_dir_entries(&conn, ino)?
         }; // conn dropped here
 
+        let append_profile = |mut entries: Vec<DirEntry>| -> Vec<DirEntry> {
+            if ino == ROOT_INO && self.api.is_some() && !entries.iter().any(|e| e.name == PROFILE_NAME) {
+                entries.push(DirEntry {
+                    name: PROFILE_NAME.to_string(),
+                    attr: ProfileFile::profile_attr(),
+                });
+            }
+            entries
+        };
+
         if !entries.is_empty() || self.api.is_none() {
-            return Ok(Some(entries));
+            return Ok(Some(append_profile(entries)));
         }
 
         // Empty directory — try API pull.
@@ -563,7 +588,7 @@ impl FileSystem for SupermemoryFs {
 
             let conn = self.db.conn.lock();
             let entries = self.query_dir_entries(&conn, ino)?;
-            return Ok(Some(entries));
+            return Ok(Some(append_profile(entries)));
         }
 
         Ok(Some(Vec::new()))
@@ -710,6 +735,12 @@ impl FileSystem for SupermemoryFs {
     }
 
     async fn open(&self, ino: u64, _flags: i32) -> VfsResult<BoxedFile> {
+        if ino == PROFILE_INO {
+            if let Some(ref api) = self.api {
+                return Ok(Arc::new(ProfileFile::new(api.clone())));
+            }
+            return Err(VfsError::NotFound);
+        }
         {
             let conn = self.db.conn.lock();
             let mode: i64 = conn
@@ -824,6 +855,10 @@ impl FileSystem for SupermemoryFs {
 
     async fn unlink(&self, parent_ino: u64, name: &str) -> VfsResult<()> {
         validate_name(name)?;
+
+        if parent_ino == ROOT_INO && name == PROFILE_NAME {
+            return Err(VfsError::PermissionDenied);
+        }
 
         // Resolve filepath BEFORE deleting dentry (needed for API sync).
         let filepath_for_api = self.resolve_filepath(parent_ino).map(|p| {

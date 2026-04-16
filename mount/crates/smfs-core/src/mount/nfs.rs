@@ -58,6 +58,7 @@ fn vfs_err_to_nfsstat3(err: &VfsError) -> nfsstat3 {
         VfsError::InvalidPath(_) => nfsstat3::NFS3ERR_INVAL,
         VfsError::NameTooLong(_) => nfsstat3::NFS3ERR_NAMETOOLONG,
         VfsError::RootOperation => nfsstat3::NFS3ERR_ACCES,
+        VfsError::PermissionDenied => nfsstat3::NFS3ERR_ACCES,
         VfsError::InvalidRename => nfsstat3::NFS3ERR_INVAL,
         // nfsserve 0.11 doesn't expose NFS3ERR_LOOP; surface as generic I/O.
         VfsError::SymlinkLoop => nfsstat3::NFS3ERR_IO,

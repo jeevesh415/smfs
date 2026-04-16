@@ -54,6 +54,10 @@ pub enum VfsError {
     #[error("too many symbolic link levels")]
     SymlinkLoop,
 
+    /// Caller does not have permission for this operation.
+    #[error("permission denied")]
+    PermissionDenied,
+
     /// Operation is defined in the trait but not supported by this backend
     /// (e.g. `mkfifo` against a backend that has no FIFO concept).
     #[error("operation not supported")]
@@ -80,6 +84,7 @@ impl VfsError {
             Self::InvalidPath(_) => libc::EINVAL,
             Self::NameTooLong(_) => libc::ENAMETOOLONG,
             Self::RootOperation => libc::EPERM,
+            Self::PermissionDenied => libc::EACCES,
             Self::InvalidRename => libc::EINVAL,
             Self::SymlinkLoop => libc::ELOOP,
             Self::NotSupported => libc::ENOTSUP,

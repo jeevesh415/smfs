@@ -89,3 +89,23 @@ pub struct BulkDeleteResp {
     pub success: bool,
     pub deleted_count: u32,
 }
+
+/// POST /v4/profile
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileReq {
+    pub container_tag: String,
+}
+
+/// Response from POST /v4/profile
+#[derive(Debug, Deserialize)]
+pub struct ProfileResp {
+    pub profile: Profile,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Profile {
+    #[serde(rename = "static")]
+    pub static_memories: Option<Vec<String>>,
+    pub dynamic: Option<Vec<String>>,
+}
