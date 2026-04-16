@@ -119,6 +119,11 @@ pub async fn run(args: Args) -> Result<()> {
     });
     let handle = mount_fs(fs, opts).await?;
 
+    // Auto-install grep wrapper on first mount.
+    if let Ok(true) = super::init::ensure_grep_wrapper_installed() {
+        eprintln!("semantic grep enabled. run: source ~/.zshrc (new terminals have it automatically)");
+    }
+
     eprintln!(
         "supermemoryfs mounted at {} (backend: {}, ctrl+c to unmount)",
         handle.mountpoint().display(),
