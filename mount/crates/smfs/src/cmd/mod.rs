@@ -11,10 +11,13 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+pub mod auth;
 pub mod daemon_inner;
 pub mod grep;
 pub mod init;
 pub mod login;
+pub mod logout;
+pub mod marker;
 pub mod mount;
 pub mod status;
 pub mod sync;
@@ -42,6 +45,9 @@ pub enum Command {
     /// Install the grep shell wrapper for transparent semantic search
     Init(init::Args),
 
+    /// Remove stored credentials
+    Logout(logout::Args),
+
     /// Force a sync cycle now
     Sync,
 
@@ -57,6 +63,7 @@ pub async fn dispatch(cmd: Command) -> Result<()> {
         Command::Mount(args) => mount::run(args).await,
         Command::Grep(args) => grep::run(args).await,
         Command::Init(args) => init::run(args).await,
+        Command::Logout(args) => logout::run(args).await,
         Command::Unmount(args) => unmount::run(args).await,
         Command::Status => status::run().await,
         Command::Sync => sync::run().await,

@@ -16,8 +16,8 @@ pub struct Args {
     #[arg(long)]
     pub tag: Option<String>,
 
-    /// Supermemory API key.
-    #[arg(long, env = "SUPERMEMORY_API_KEY", hide_env_values = true)]
+    /// Supermemory API key (resolved from stored credentials if omitted).
+    #[arg(long)]
     pub key: Option<String>,
 
     /// Override the Supermemory API base URL.
@@ -25,48 +25,11 @@ pub struct Args {
     pub api_url: Option<String>,
 }
 
-/// Read the `.smfs` marker file to get container tag and API URL.
-#[allow(dead_code)]
-struct SmfsMarker {
-    tag: String,
-    api_url: String,
-    mount_path: Option<String>,
-}
-
-fn read_smfs_marker() -> Option<SmfsMarker> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        let marker = dir.join(".smfs");
-        if marker.exists() {
-            let content = std::fs::read_to_string(&marker).ok()?;
-            let mut tag = None;
-            let mut url = None;
-            let mut mount_path = None;
-            for line in content.lines() {
-                if let Some(v) = line.strip_prefix("container_tag=") {
-                    tag = Some(v.to_string());
-                }
-                if let Some(v) = line.strip_prefix("api_url=") {
-                    url = Some(v.to_string());
-                }
-                if let Some(v) = line.strip_prefix("mount_path=") {
-                    mount_path = Some(v.to_string());
-                }
-            }
-            return Some(SmfsMarker {
-                tag: tag?,
-                api_url: url.unwrap_or_else(|| "https://api.supermemory.ai".to_string()),
-                mount_path,
-            });
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    None
-}
-
 pub async fn run(args: Args) -> Result<()> {
+    use super::marker::read_smfs_marker;
+
+    let marker = read_smfs_marker();
+
     // Resolve container tag + API URL.
     let (tag, api_url) = if let Some(tag) = &args.tag {
         let url = args
@@ -74,20 +37,19 @@ pub async fn run(args: Args) -> Result<()> {
             .clone()
             .unwrap_or_else(|| "https://api.supermemory.ai".to_string());
         (tag.clone(), url)
-    } else if let Some(marker) = read_smfs_marker() {
-        let url = args.api_url.clone().unwrap_or(marker.api_url);
-        (marker.tag, url)
+    } else if let Some(ref m) = marker {
+        let url = args.api_url.clone().unwrap_or_else(|| m.api_url.clone());
+        (m.tag.clone(), url)
     } else {
         anyhow::bail!(
             "No container tag found. Either run from inside a mounted directory or pass --tag."
         );
     };
 
-    let key = args.key.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("API key required. Pass --key or set SUPERMEMORY_API_KEY.")
-    })?;
+    let mount_path = marker.as_ref().and_then(|m| m.mount_path.as_deref()).map(std::path::Path::new);
+    let key = super::auth::resolve_api_key(args.key.as_deref(), mount_path)?;
 
-    let client = smfs_core::api::ApiClient::new(&api_url, key, &tag);
+    let client = smfs_core::api::ApiClient::new(&api_url, &key, &tag);
 
     // Determine filepath prefix from path arg.
     let filepath = args.path.as_deref().map(|p| {

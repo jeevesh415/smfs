@@ -35,8 +35,8 @@ pub struct Args {
     #[arg(long)]
     pub ephemeral: bool,
 
-    /// Supermemory API key. Normally passed by the TS CLI; accepted here for direct use.
-    #[arg(long, env = "SUPERMEMORY_API_KEY", hide_env_values = true)]
+    /// Supermemory API key. Saved to project credentials when provided.
+    #[arg(long)]
     pub key: Option<String>,
 
     /// Override the Supermemory API base URL.
@@ -108,17 +108,25 @@ pub async fn run(args: Args) -> Result<()> {
         Arc::new(Db::open(&db_path)?)
     };
 
-    let fs = Arc::new(match &args.key {
-        Some(key) => {
-            let api = Arc::new(smfs_core::api::ApiClient::new(
-                args.api_url.as_deref().unwrap_or("https://api.supermemory.ai"),
-                key,
-                &args.container_tag,
-            ));
-            SupermemoryFs::with_api(db, api)
+    let api_key = super::auth::resolve_api_key(args.key.as_deref(), Some(&mount_path_copy))?;
+
+    // Auto-save to project credentials when --key is explicitly provided.
+    if args.key.is_some() {
+        let creds = smfs_core::config::credentials::Credentials {
+            api_key: api_key.clone(),
+            api_url: args.api_url.clone(),
+        };
+        if let Err(e) = smfs_core::config::credentials::save_project(&mount_path_copy, &creds) {
+            tracing::warn!("failed to save project credentials: {e}");
         }
-        None => SupermemoryFs::new(db),
-    });
+    }
+
+    let api = Arc::new(smfs_core::api::ApiClient::new(
+        api_url_str,
+        &api_key,
+        &args.container_tag,
+    ));
+    let fs = Arc::new(SupermemoryFs::with_api(db, api));
     let handle = mount_fs(fs, opts).await?;
 
     // Auto-install grep wrapper on first mount.

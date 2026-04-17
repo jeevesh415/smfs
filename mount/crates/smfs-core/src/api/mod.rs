@@ -51,6 +51,46 @@ impl ApiClient {
         &self.container_tag
     }
 
+    /// Validate an API key by hitting GET /v3/session.
+    /// This is a standalone function (no ApiClient instance needed).
+    pub async fn validate_key(base_url: &str, api_key: &str) -> Result<String, ApiError> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| ApiError::Network(e))?;
+
+        let url = format!("{}/v3/session", base_url.trim_end_matches('/'));
+        let resp = http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(ApiError::Network)?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ApiError::Auth);
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::Server {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        // Extract org name from response for display.
+        let body: serde_json::Value = resp.json().await.map_err(ApiError::Network)?;
+        let org_name = body
+            .get("org")
+            .and_then(|o| o.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        Ok(org_name)
+    }
+
     /// List documents, optionally filtered by filepath prefix or exact match.
     pub async fn list_documents(
         &self,

@@ -4,6 +4,8 @@
 //! per operating system. Uses the `directories` crate so we don't branch
 //! on OS manually.
 
+pub mod credentials;
+
 use std::path::PathBuf;
 
 /// Return the platform-appropriate cache directory for supermemoryfs.
