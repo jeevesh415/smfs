@@ -42,6 +42,19 @@ pub struct Args {
     /// Override the Supermemory API base URL.
     #[arg(long, env = "SUPERMEMORY_API_URL")]
     pub api_url: Option<String>,
+
+    /// Filesystem paths under this mount that should produce memories
+    /// (comma-separated). Entries ending with `/` match any file inside that
+    /// folder recursively; other entries match exactly.
+    ///
+    ///   `--memory-paths "/notes/,/journal.md"` → scope to those paths
+    ///   `--memory-paths ""`                    → disable memory generation
+    ///   (flag omitted)                         → leave existing config alone
+    ///
+    /// When omitted, nothing is written — the server keeps whatever the tag
+    /// already has, falling back to its built-in defaults when unset.
+    #[arg(long)]
+    pub memory_paths: Option<String>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -126,6 +139,19 @@ pub async fn run(args: Args) -> Result<()> {
         &api_key,
         &args.container_tag,
     ));
+
+    if let Some(raw) = &args.memory_paths {
+        let paths: Vec<String> = if raw.is_empty() {
+            Vec::new()
+        } else {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        api.update_memory_paths(paths).await?;
+    }
+
     let fs = Arc::new(SupermemoryFs::with_api(db, api));
     let handle = mount_fs(fs, opts).await?;
 

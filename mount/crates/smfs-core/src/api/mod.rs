@@ -163,6 +163,22 @@ impl ApiClient {
         Ok(())
     }
 
+    pub async fn update_memory_paths(&self, paths: Vec<String>) -> Result<(), ApiError> {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body {
+            memory_filesystem_paths: Vec<String>,
+        }
+
+        self.patch(&format!("/v3/container-tags/{}", self.container_tag))
+            .json(&Body {
+                memory_filesystem_paths: paths,
+            })
+            .send_with_retry()
+            .await?;
+        Ok(())
+    }
+
     /// Bulk delete documents by filepath prefix or exact match.
     pub async fn delete_documents(&self, filepath: &str) -> Result<BulkDeleteResp, ApiError> {
         let body = BulkDeleteReq {
