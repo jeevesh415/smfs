@@ -208,7 +208,11 @@ pub(crate) enum MountHandleInner {
     /// Live FUSE mount. `session` owns the fuser daemon threads and the
     /// kernel mount. Dropping it calls `fusermount3 -u` automatically.
     #[cfg(target_os = "linux")]
-    Fuse { session: fuser::BackgroundSession },
+    Fuse {
+        // Held for RAII drop — never read. Dropping the session unmounts.
+        #[allow(dead_code)]
+        session: fuser::BackgroundSession,
+    },
 }
 
 // Manual Debug because fuser::BackgroundSession may not impl Debug.
