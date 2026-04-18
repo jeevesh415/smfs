@@ -20,7 +20,7 @@ grep() {
     _smfs_dir="$PWD"
     while [ "$_smfs_dir" != "/" ]; do
         if [ -f "$_smfs_dir/.smfs" ]; then
-            _smfs_mp=$(grep '^mount_path=' "$_smfs_dir/.smfs" 2>/dev/null | cut -d= -f2-)
+            _smfs_mp=$(command grep '^mount_path=' "$_smfs_dir/.smfs" 2>/dev/null | cut -d= -f2-)
             # Only trigger if CWD is the mount dir or inside it.
             case "$PWD" in "$_smfs_mp"|"$_smfs_mp"/*) _smfs_found=1 ;; esac
             break
