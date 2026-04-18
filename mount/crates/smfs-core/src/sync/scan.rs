@@ -93,6 +93,7 @@ pub async fn deletion_scan(fs: &Arc<SupermemoryFs>) -> anyhow::Result<usize> {
         }
     }
 
-    fs.db().sync_meta_set(SYNC_META_LAST_TOTAL, &total.to_string());
+    fs.db()
+        .sync_meta_set(SYNC_META_LAST_TOTAL, &total.to_string());
     Ok(removed)
 }

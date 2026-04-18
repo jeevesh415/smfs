@@ -155,6 +155,7 @@ impl Db {
     /// Mark an inode as locally dirty (user wrote to it) at the given epoch-ms.
     /// The pull reconciler will not clobber this inode if its `dirty_since` is
     /// newer than the remote `updatedAt`.
+    #[allow(dead_code)] // wired in M8 (push queue)
     pub(crate) fn set_dirty_since(&self, ino: u64, epoch_ms: Option<i64>) {
         let conn = self.conn.lock();
         let _ = conn.execute(
@@ -192,12 +193,7 @@ impl Db {
                     last_status         = COALESCE(?3, last_status),
                     last_status_at      = COALESCE(?4, last_status_at)
               WHERE ino = ?1",
-            rusqlite::params![
-                ino as i64,
-                mirrored_updated_at,
-                last_status,
-                last_status_at,
-            ],
+            rusqlite::params![ino as i64, mirrored_updated_at, last_status, last_status_at,],
         );
     }
 
@@ -232,11 +228,9 @@ impl Db {
     /// Read a sync_meta value by key.
     pub(crate) fn sync_meta_get(&self, key: &str) -> Option<String> {
         let conn = self.conn.lock();
-        conn.query_row(
-            "SELECT value FROM sync_meta WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        )
+        conn.query_row("SELECT value FROM sync_meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
         .ok()
     }
 
@@ -257,6 +251,7 @@ impl Db {
     ///   (intermediate write is dropped on the floor).
     /// - Row exists AND inflight → write to the `pending_*` slot (if the
     ///   pending slot is also filled, the newest write wins there too).
+    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_upsert(
         &self,
         filepath: &str,
@@ -311,6 +306,7 @@ impl Db {
     /// Atomically claim the next queued job whose backoff has elapsed, marking
     /// it inflight by stamping `inflight_started_at`. Returns None if the
     /// queue is empty or everything is either inflight or backing off.
+    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_claim_next(&self, now_ms: i64) -> Option<PushJob> {
         let conn = self.conn.lock();
         let row = conn
@@ -375,6 +371,7 @@ impl Db {
 
     /// Stamp the remote_id that came back from a create. Used so the inflight
     /// poller can GET /v3/documents/:id while this job is still processing.
+    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_set_remote_id(&self, filepath: &str, remote_id: &str) {
         let conn = self.conn.lock();
         let _ = conn.execute(
@@ -385,6 +382,7 @@ impl Db {
 
     /// Mark a successful push. If a pending op is queued, promote it into the
     /// primary slot; otherwise delete the row.
+    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_finalize_success(&self, filepath: &str, now_ms: i64) {
         let conn = self.conn.lock();
         let pending: Option<(String, Option<i64>, Option<String>)> = conn
@@ -421,6 +419,7 @@ impl Db {
 
     /// Mark a failed push. Clears the inflight marker, increments attempt,
     /// and pushes `updated_at` forward by `backoff_ms` so the worker waits.
+    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_finalize_failure(
         &self,
         filepath: &str,
@@ -442,6 +441,7 @@ impl Db {
     }
 
     /// Return all rows currently inflight. Used by Loop B to poll status.
+    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_inflight(&self) -> Vec<InflightRow> {
         let conn = self.conn.lock();
         let mut stmt = match conn.prepare(
@@ -467,6 +467,7 @@ impl Db {
     }
 
     /// Count rows that still have work to do (either pending or inflight).
+    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_len(&self) -> usize {
         let conn = self.conn.lock();
         conn.query_row("SELECT COUNT(*) FROM push_queue", [], |r| {
@@ -477,6 +478,7 @@ impl Db {
     }
 }
 
+#[allow(dead_code)] // wired in M8
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PushOp {
     Create,
@@ -506,6 +508,7 @@ impl PushOp {
     }
 }
 
+#[allow(dead_code)] // wired in M8
 #[derive(Debug)]
 pub(crate) struct PushJob {
     pub filepath: String,
@@ -516,6 +519,7 @@ pub(crate) struct PushJob {
     pub inflight_remote_id: Option<String>,
 }
 
+#[allow(dead_code)] // wired in M8
 #[derive(Debug)]
 pub(crate) struct InflightRow {
     pub filepath: String,
@@ -525,7 +529,6 @@ pub(crate) struct InflightRow {
 }
 
 impl Db {
-
     /// Read a `FileAttr` from an fs_inode row.
     #[allow(dead_code)] // used by SupermemoryFs in M5b
     pub(crate) fn row_to_attr(row: &rusqlite::Row) -> rusqlite::Result<FileAttr> {

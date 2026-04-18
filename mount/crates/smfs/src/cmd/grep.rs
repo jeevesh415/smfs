@@ -30,7 +30,9 @@ pub async fn run(args: Args) -> Result<()> {
 
     if args.query.trim().is_empty() {
         eprintln!("# supermemory semantic search — provide a query");
-        eprintln!("# inside a mounted container, `grep` without flags is powered by semantic search.");
+        eprintln!(
+            "# inside a mounted container, `grep` without flags is powered by semantic search."
+        );
         eprintln!("# usage:");
         eprintln!("#   grep \"natural language query\"         search by meaning, all files");
         eprintln!("#   grep \"query\" path/to/dir/             scope to a directory");

@@ -208,10 +208,7 @@ impl SupermemoryFs {
     /// Versioning rules: if local `dirty_since` is newer than the remote's
     /// `updatedAt`, skip (local write in progress wins). Otherwise create,
     /// rename, or rewrite chunks as needed.
-    pub(crate) fn reconcile_one(
-        &self,
-        doc: &crate::api::Document,
-    ) -> VfsResult<ReconcileOutcome> {
+    pub(crate) fn reconcile_one(&self, doc: &crate::api::Document) -> VfsResult<ReconcileOutcome> {
         let filepath = match doc.filepath.as_deref() {
             Some(fp) if !fp.is_empty() => fp,
             _ => return Ok(ReconcileOutcome::Skipped),
@@ -279,12 +276,8 @@ impl SupermemoryFs {
             } else {
                 // In-progress: track status for observability but leave
                 // `mirrored_updated_at` alone so we keep re-polling until done.
-                self.db.set_mirrored_state(
-                    existing_ino,
-                    None,
-                    Some(&doc.status),
-                    Some(now_ms()),
-                );
+                self.db
+                    .set_mirrored_state(existing_ino, None, Some(&doc.status), Some(now_ms()));
             }
             return Ok(ReconcileOutcome::Updated);
         }
@@ -317,12 +310,8 @@ impl SupermemoryFs {
                     self.rewrite_file_content(ino, content)?;
                 }
             }
-            self.db.set_mirrored_state(
-                ino,
-                updated_ms,
-                Some(&doc.status),
-                Some(now_ms()),
-            );
+            self.db
+                .set_mirrored_state(ino, updated_ms, Some(&doc.status), Some(now_ms()));
             return Ok(ReconcileOutcome::Attached);
         }
 
@@ -369,12 +358,8 @@ impl SupermemoryFs {
             .lock()
             .put((parent_ino, filename.to_string()), file_ino);
         self.db.set_remote_id(file_ino, &doc.id);
-        self.db.set_mirrored_state(
-            file_ino,
-            updated_ms,
-            Some(&doc.status),
-            Some(now_ms()),
-        );
+        self.db
+            .set_mirrored_state(file_ino, updated_ms, Some(&doc.status), Some(now_ms()));
 
         Ok(ReconcileOutcome::Created)
     }
@@ -485,7 +470,7 @@ fn parse_iso_to_ms(iso: &str) -> Option<i64> {
     let t = iso.find('T')?;
     let date = &iso[..t];
     let rest = &iso[t + 1..];
-    let (time, _tz) = rest.split_once(|c| c == 'Z' || c == '+' || c == '-')?;
+    let (time, _tz) = rest.split_once(['Z', '+', '-'])?;
     let (y, m, d): (i64, i64, i64) = {
         let mut it = date.split('-');
         let y = it.next()?.parse().ok()?;
@@ -503,9 +488,14 @@ fn parse_iso_to_ms(iso: &str) -> Option<i64> {
     let (sec, ms) = match s_part.split_once('.') {
         Some((s, frac)) => {
             let sec: i64 = s.parse().ok()?;
-            let mut fracs = frac.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+            let mut fracs = frac
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>();
             fracs.truncate(3);
-            while fracs.len() < 3 { fracs.push('0'); }
+            while fracs.len() < 3 {
+                fracs.push('0');
+            }
             let ms: i64 = fracs.parse().ok()?;
             (sec, ms)
         }

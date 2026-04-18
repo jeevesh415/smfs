@@ -141,7 +141,11 @@ pub async fn run(_args: Args) -> Result<()> {
     reinstall_grep_wrapper()?;
     use std::io::IsTerminal;
     let color = std::io::stderr().is_terminal();
-    let cmd = if color { "\x1b[1;36msource ~/.zshrc\x1b[0m" } else { "source ~/.zshrc" };
+    let cmd = if color {
+        "\x1b[1;36msource ~/.zshrc\x1b[0m"
+    } else {
+        "source ~/.zshrc"
+    };
     eprintln!("semantic grep (re)installed.");
     eprintln!("run: {cmd}");
     Ok(())
