@@ -11,6 +11,7 @@ pub use dto::*;
 pub use error::ApiError;
 
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 const MAX_RETRIES: u32 = 5;
@@ -21,6 +22,10 @@ pub struct ApiClient {
     base_url: String,
     api_key: String,
     container_tag: String,
+    /// Count of write-side HTTP calls (POST/PATCH/DELETE) dispatched by this
+    /// client. Used by tests to verify coalescing behavior; safe to ignore in
+    /// production — it's a simple atomic counter.
+    write_calls: AtomicU32,
 }
 
 impl std::fmt::Debug for ApiClient {
@@ -44,11 +49,19 @@ impl ApiClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             container_tag: container_tag.to_string(),
+            write_calls: AtomicU32::new(0),
         }
     }
 
     pub fn container_tag(&self) -> &str {
         &self.container_tag
+    }
+
+    /// Number of write-side HTTP calls (POST/PATCH/DELETE) made by this
+    /// client since the counter was last read. Cheap atomic — intended for
+    /// test assertions on coalescing behavior.
+    pub fn write_calls(&self) -> u32 {
+        self.write_calls.load(Ordering::Relaxed)
     }
 
     /// Validate an API key by hitting GET /v3/session.
@@ -127,7 +140,7 @@ impl ApiClient {
         &self,
         body: &ListDocumentsReq,
     ) -> Result<ListDocumentsResp, ApiError> {
-        self.post("/v3/documents/list")
+        self.post_read("/v3/documents/list")
             .json(body)
             .send_with_retry()
             .await?
@@ -219,7 +232,7 @@ impl ApiClient {
             include: SearchInclude { documents: true },
         };
 
-        self.post("/v4/search")
+        self.post_read("/v4/search")
             .json(&body)
             .send_with_retry()
             .await?
@@ -233,7 +246,7 @@ impl ApiClient {
             container_tag: self.container_tag.clone(),
         };
 
-        self.post("/v4/profile")
+        self.post_read("/v4/profile")
             .json(&body)
             .send_with_retry()
             .await?
@@ -247,15 +260,26 @@ impl ApiClient {
         RetryableRequest::new(self.authed(self.http.get(self.url(path))))
     }
 
+    /// POST endpoint that counts as a write-side call (for test visibility
+    /// into coalescing). Use for actual mutations (document create).
     fn post(&self, path: &str) -> RetryableRequest {
+        self.write_calls.fetch_add(1, Ordering::Relaxed);
+        RetryableRequest::new(self.authed(self.http.post(self.url(path))))
+    }
+
+    /// POST endpoint that is semantically a read (list/search/profile).
+    /// Doesn't affect `write_calls`.
+    fn post_read(&self, path: &str) -> RetryableRequest {
         RetryableRequest::new(self.authed(self.http.post(self.url(path))))
     }
 
     fn patch(&self, path: &str) -> RetryableRequest {
+        self.write_calls.fetch_add(1, Ordering::Relaxed);
         RetryableRequest::new(self.authed(self.http.patch(self.url(path))))
     }
 
     fn delete(&self, path: &str) -> RetryableRequest {
+        self.write_calls.fetch_add(1, Ordering::Relaxed);
         RetryableRequest::new(self.authed(self.http.delete(self.url(path))))
     }
 

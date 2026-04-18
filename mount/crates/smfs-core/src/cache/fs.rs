@@ -461,10 +461,55 @@ impl SupermemoryFs {
     pub(crate) fn api(&self) -> Option<&Arc<crate::api::ApiClient>> {
         self.api.as_ref()
     }
+
+    /// Number of rows currently in the push queue (drives unmount drain).
+    pub fn push_queue_len(&self) -> usize {
+        self.db.push_queue_len()
+    }
+
+    /// Snapshot of the push_queue row for a given filepath (for tests /
+    /// diagnostics only).
+    pub fn push_queue_inspect(&self, filepath: &str) -> Option<PushQueueSnapshot> {
+        let conn = self.db.conn.lock();
+        conn.query_row(
+            "SELECT op, inflight_started_at, pending_op, remote_id
+               FROM push_queue WHERE filepath = ?1",
+            [filepath],
+            |r| {
+                Ok(PushQueueSnapshot {
+                    op: r.get::<_, String>(0)?,
+                    inflight: r.get::<_, Option<i64>>(1)?.is_some(),
+                    pending_op: r.get::<_, Option<String>>(2)?,
+                    remote_id: r.get::<_, Option<String>>(3)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    /// Read the `dirty_since` watermark for an inode (for tests / diagnostics).
+    pub fn dirty_since_of(&self, ino: u64) -> Option<i64> {
+        self.db.get_dirty_since(ino)
+    }
+
+    /// Run one pass of the delta pull synchronously (for tests to trigger a
+    /// pull without waiting on the 30s loop).
+    pub async fn pull_once(self: &Arc<Self>) -> anyhow::Result<usize> {
+        crate::sync::pull::delta_pull(self).await
+    }
+}
+
+/// Snapshot of a push_queue row returned by [`SupermemoryFs::push_queue_inspect`].
+#[derive(Debug, Clone)]
+pub struct PushQueueSnapshot {
+    pub op: String,
+    pub inflight: bool,
+    pub pending_op: Option<String>,
+    pub remote_id: Option<String>,
 }
 
 /// Epoch-ms parsing for ISO-8601 timestamps returned by the API.
-fn parse_iso_to_ms(iso: &str) -> Option<i64> {
+pub(crate) fn parse_iso_to_ms(iso: &str) -> Option<i64> {
     // Minimal RFC3339 parser sufficient for API timestamps
     // (e.g. "2026-04-18T06:55:52.356Z"). Returns epoch-ms.
     let t = iso.find('T')?;
@@ -1200,20 +1245,19 @@ impl FileSystem for SupermemoryFs {
             .lock()
             .pop(&(parent_ino, name.to_string()));
 
-        // Push delete to API (fire-and-forget).
-        if let Some(ref api) = self.api {
+        // Push delete to API via the push queue (durable, coalescing).
+        if self.api.is_some() {
             if let Some(fp) = filepath_for_api {
-                let api = api.clone();
-                tokio::spawn(async move {
-                    match api.delete_documents(&fp).await {
-                        Ok(r) => {
-                            tracing::debug!(filepath = %fp, deleted = r.deleted_count, "deleted from API")
-                        }
-                        Err(e) => {
-                            tracing::warn!(filepath = %fp, error = %e, "failed to delete from API")
-                        }
-                    }
-                });
+                let remote_id = self.db.get_remote_id(child_ino as u64);
+                self.db.push_queue_upsert(
+                    &fp,
+                    super::db::PushOp::Delete,
+                    None,
+                    None,
+                    remote_id.as_deref(),
+                    now_ms(),
+                );
+                tracing::debug!(filepath = %fp, "enqueued push (delete)");
             }
         }
 
@@ -1569,50 +1613,35 @@ impl FileSystem for SupermemoryFs {
             format!("{p}{sep}{new_name}")
         });
 
-        // Delete overwritten destination from API.
-        if did_overwrite {
-            if let Some(ref api) = self.api {
-                if let Some(ref dst_fp) = dst_filepath_for_delete {
-                    let api = api.clone();
-                    let dst_fp = dst_fp.clone();
-                    tokio::spawn(async move {
-                        match api.delete_documents(&dst_fp).await {
-                            Ok(r) => {
-                                tracing::debug!(filepath = %dst_fp, deleted = r.deleted_count, "deleted overwritten file from API")
-                            }
-                            Err(e) => {
-                                tracing::warn!(filepath = %dst_fp, error = %e, "failed to delete overwritten file from API")
-                            }
-                        }
-                    });
-                }
+        // Delete overwritten destination via the push queue.
+        if did_overwrite && self.api.is_some() {
+            if let Some(dst_fp) = dst_filepath_for_delete {
+                self.db.push_queue_upsert(
+                    &dst_fp,
+                    super::db::PushOp::Delete,
+                    None,
+                    None,
+                    None,
+                    now_ms(),
+                );
+                tracing::debug!(filepath = %dst_fp, "enqueued push (rename overwrote)");
             }
         }
 
-        // Push rename to API.
-        if let Some(ref api) = self.api {
+        // Enqueue rename via the push queue. The worker looks up the doc by
+        // old filepath and PATCHes its `filepath` to new.
+        if self.api.is_some() {
             if let (Some(old_fp), Some(new_fp)) = (old_filepath, new_filepath) {
-                match api.list_documents(Some(&old_fp)).await {
-                    Ok(docs) => {
-                        for doc in docs {
-                            let req = crate::api::UpdateDocumentReq {
-                                filepath: Some(new_fp.clone()),
-                                content: None,
-                            };
-                            match api.update_document(&doc.id, &req).await {
-                                Ok(_) => {
-                                    tracing::debug!(old = %old_fp, new = %new_fp, "renamed in API")
-                                }
-                                Err(e) => {
-                                    tracing::warn!(old = %old_fp, error = %e, "API rename failed")
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(old = %old_fp, error = %e, "API list for rename failed")
-                    }
-                }
+                let remote_id = self.db.get_remote_id(src_ino as u64);
+                self.db.push_queue_upsert(
+                    &old_fp,
+                    super::db::PushOp::Rename,
+                    None,
+                    Some(&new_fp),
+                    remote_id.as_deref(),
+                    now_ms(),
+                );
+                tracing::debug!(old = %old_fp, new = %new_fp, "enqueued push (rename)");
             }
         }
 

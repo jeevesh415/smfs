@@ -74,8 +74,8 @@ CREATE TABLE IF NOT EXISTS push_queue (
     op                   TEXT NOT NULL,
     content_ino          INTEGER,
     rename_to            TEXT,
-    inflight_remote_id   TEXT,
-    inflight_started_at  INTEGER,
+    remote_id            TEXT,              -- known at enqueue for update/delete/rename; NULL for pure create
+    inflight_started_at  INTEGER,           -- non-NULL marks this row as currently being sent
     pending_op           TEXT,
     pending_content_ino  INTEGER,
     pending_rename_to    TEXT,

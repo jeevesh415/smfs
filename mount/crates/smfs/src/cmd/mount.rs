@@ -67,6 +67,12 @@ pub struct Args {
     /// Disable all background sync loops (debugging).
     #[arg(long)]
     pub no_sync: bool,
+
+    /// Max seconds to spend draining the push queue at unmount time.
+    /// Queue rows persist in SQLite; anything not drained resumes on next
+    /// mount. Default 30s.
+    #[arg(long, default_value_t = 30)]
+    pub drain_timeout: u64,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -226,6 +232,37 @@ pub async fn run(args: Args) -> Result<()> {
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
     eprintln!("\nunmounting...");
+
+    // Drain the push queue BEFORE we tell the sync loops to stop. Bounded by
+    // --drain-timeout. Anything left persists in SQLite and resumes on the
+    // next mount.
+    if !args.no_sync {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(args.drain_timeout);
+        let mut last_report = 0usize;
+        loop {
+            let n = fs.push_queue_len();
+            if n == 0 {
+                if last_report > 0 {
+                    eprintln!("push queue drained");
+                }
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    pending = n,
+                    "push queue drain timeout; rows persist and will resume next mount"
+                );
+                eprintln!("push queue drain timed out with {n} pending (will resume next mount)");
+                break;
+            }
+            if n != last_report {
+                eprintln!("draining push queue: {n} pending");
+                last_report = n;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
 
     // Signal sync loops to exit, then wait for them to wind down (bounded).
     let _ = shutdown_tx.send(true);

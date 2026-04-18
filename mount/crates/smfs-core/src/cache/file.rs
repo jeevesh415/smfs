@@ -4,8 +4,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::db::Db;
+use super::db::{Db, PushOp};
 use crate::vfs::{FileAttr, Timestamp, VfsError, VfsResult};
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// A handle to an open file backed by chunked SQLite storage.
 ///
@@ -164,17 +172,27 @@ impl crate::vfs::File for SqliteFile {
             written += to_write;
         }
 
-        // Update size and mtime.
+        // Update size and mtime, and mark the inode dirty so the pull
+        // reconciler won't clobber local edits while our push is in flight.
         let new_size = (current_size as u64).max(offset + data.len() as u64);
         let now = Timestamp::now();
+        let dirty_ms = now_ms();
         tx.execute(
-            "UPDATE fs_inode SET size = ?1, mtime = ?2, mtime_nsec = ?3, ctime = ?4, ctime_nsec = ?5 WHERE ino = ?6",
+            "UPDATE fs_inode
+                SET size         = ?1,
+                    mtime        = ?2,
+                    mtime_nsec   = ?3,
+                    ctime        = ?4,
+                    ctime_nsec   = ?5,
+                    dirty_since  = ?6
+              WHERE ino = ?7",
             rusqlite::params![
                 new_size as i64,
                 now.sec,
                 now.nsec,
                 now.sec,
                 now.nsec,
+                dirty_ms,
                 self.ino as i64
             ],
         )
@@ -246,8 +264,12 @@ impl crate::vfs::File for SqliteFile {
 
     async fn flush(&self) -> VfsResult<()> {
         // SQLite writes are already durable after each transaction commit.
-        // If we have an API client, push the file content to the cloud.
-        let Some(api) = &self.api else { return Ok(()) };
+        // If we have an API client and a filepath, enqueue a push op so the
+        // background worker can coalesce rapid saves into at most one
+        // inflight + one pending request per filepath.
+        if self.api.is_none() {
+            return Ok(());
+        }
         let Some(filepath) = &self.filepath else {
             return Ok(());
         };
@@ -266,51 +288,23 @@ impl crate::vfs::File for SqliteFile {
             return Ok(());
         }
 
-        let content = self.read(0, size as usize).await?;
-        let text = String::from_utf8_lossy(&content).into_owned();
-
-        // Check if this inode already has a remote document.
         let existing_remote_id = self.db.get_remote_id(self.ino);
-
-        if let Some(remote_id) = existing_remote_id {
-            // Existing document — PATCH to update content.
-            let req = crate::api::UpdateDocumentReq {
-                filepath: Some(filepath.clone()),
-                content: Some(text.clone()),
-            };
-            match api.update_document(&remote_id, &req).await {
-                Ok(()) => {
-                    tracing::debug!(filepath, doc_id = %remote_id, "updated in API (PATCH)");
-                }
-                Err(crate::api::ApiError::NotFound) => {
-                    // Remote doc was deleted externally. Clear stale mapping and re-create.
-                    self.db.delete_remote_id(self.ino);
-                    match api.create_document(&text, filepath).await {
-                        Ok(resp) => {
-                            self.db.set_remote_id(self.ino, &resp.id);
-                            tracing::debug!(filepath, doc_id = %resp.id, "re-created in API after 404");
-                        }
-                        Err(e) => {
-                            tracing::warn!(filepath, error = %e, "failed to re-create in API");
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(filepath, doc_id = %remote_id, error = %e, "failed to update in API");
-                }
-            }
+        let op = if existing_remote_id.is_some() {
+            PushOp::Update
         } else {
-            // New document — POST to create, then store the returned ID.
-            match api.create_document(&text, filepath).await {
-                Ok(resp) => {
-                    self.db.set_remote_id(self.ino, &resp.id);
-                    tracing::debug!(filepath, doc_id = %resp.id, "created in API (POST)");
-                }
-                Err(e) => {
-                    tracing::warn!(filepath, error = %e, "failed to create in API");
-                }
-            }
-        }
+            PushOp::Create
+        };
+
+        self.db.push_queue_upsert(
+            filepath,
+            op,
+            Some(self.ino),
+            None,
+            existing_remote_id.as_deref(),
+            now_ms(),
+        );
+
+        tracing::debug!(filepath, op = op.as_str(), "enqueued push (flush)",);
 
         Ok(())
     }

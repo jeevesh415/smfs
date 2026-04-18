@@ -1,9 +1,11 @@
 //! SQLite database wrapper for the local filesystem cache.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use tokio::sync::Notify;
 
 use crate::vfs::{FileAttr, Timestamp, DEFAULT_DIR_MODE, PREFERRED_BLOCK_SIZE};
 
@@ -25,6 +27,9 @@ pub const DENTRY_CACHE_MAX: usize = 10_000;
 pub struct Db {
     pub(crate) conn: Mutex<Connection>,
     pub(crate) chunk_size: usize,
+    /// Fires on every `push_queue_upsert`; the push worker `.notified().await`s
+    /// it to wake up immediately instead of waiting for the next poll tick.
+    pub(crate) push_notify: Arc<Notify>,
 }
 
 impl Db {
@@ -62,6 +67,9 @@ impl Db {
             "ALTER TABLE fs_remote ADD COLUMN mirrored_updated_at INTEGER",
             "ALTER TABLE fs_remote ADD COLUMN last_status         TEXT",
             "ALTER TABLE fs_remote ADD COLUMN last_status_at      INTEGER",
+            // M8: push_queue gains a remote_id column (renamed from inflight_remote_id
+            // for semantic clarity — known at enqueue time for update/delete/rename).
+            "ALTER TABLE push_queue ADD COLUMN remote_id TEXT",
         ];
         for sql in migrations {
             if let Err(e) = conn.execute(sql, []) {
@@ -75,12 +83,18 @@ impl Db {
         let db = Self {
             conn: Mutex::new(conn),
             chunk_size: DEFAULT_CHUNK_SIZE,
+            push_notify: Arc::new(Notify::new()),
         };
 
         db.ensure_root()?;
         db.ensure_config()?;
 
         Ok(db)
+    }
+
+    /// Handle that the push worker awaits to wake on enqueue.
+    pub(crate) fn push_notify(&self) -> Arc<Notify> {
+        self.push_notify.clone()
     }
 
     /// Ensure the root directory inode (ino=1) exists.
@@ -155,7 +169,6 @@ impl Db {
     /// Mark an inode as locally dirty (user wrote to it) at the given epoch-ms.
     /// The pull reconciler will not clobber this inode if its `dirty_since` is
     /// newer than the remote `updatedAt`.
-    #[allow(dead_code)] // wired in M8 (push queue)
     pub(crate) fn set_dirty_since(&self, ino: u64, epoch_ms: Option<i64>) {
         let conn = self.conn.lock();
         let _ = conn.execute(
@@ -165,7 +178,6 @@ impl Db {
     }
 
     /// Get the dirty watermark for an inode, if any.
-    #[allow(dead_code)]
     pub(crate) fn get_dirty_since(&self, ino: u64) -> Option<i64> {
         let conn = self.conn.lock();
         conn.query_row(
@@ -251,17 +263,18 @@ impl Db {
     ///   (intermediate write is dropped on the floor).
     /// - Row exists AND inflight → write to the `pending_*` slot (if the
     ///   pending slot is also filled, the newest write wins there too).
-    #[allow(dead_code)] // wired in M8
     pub(crate) fn push_queue_upsert(
         &self,
         filepath: &str,
         op: PushOp,
         content_ino: Option<u64>,
         rename_to: Option<&str>,
+        remote_id: Option<&str>,
         now_ms: i64,
     ) {
         let conn = self.conn.lock();
         let op_str = op.as_str();
+        let content_i64 = content_ino.map(|n| n as i64);
 
         let inflight_started: Option<i64> = conn
             .query_row(
@@ -272,10 +285,8 @@ impl Db {
             .ok()
             .flatten();
 
-        let content_i64 = content_ino.map(|n| n as i64);
-
-        if let Some(_started) = inflight_started {
-            // Something is in flight; park the write in the pending slot.
+        if inflight_started.is_some() {
+            // Inflight; park write in the pending slot. Latest always wins.
             let _ = conn.execute(
                 "UPDATE push_queue
                     SET pending_op           = ?2,
@@ -286,32 +297,43 @@ impl Db {
                 rusqlite::params![filepath, op_str, content_i64, rename_to, now_ms],
             );
         } else {
-            // No inflight; coalesce into the primary slot.
+            // Not inflight; coalesce into main slot. ON CONFLICT replaces.
+            // remote_id is set only if incoming value is non-NULL (otherwise
+            // keep whatever was there — a prior create's remote_id mustn't be
+            // clobbered by a subsequent update that didn't pass one).
             let _ = conn.execute(
                 "INSERT INTO push_queue
-                    (filepath, op, content_ino, rename_to, attempt, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, ?5)
+                    (filepath, op, content_ino, rename_to, remote_id, attempt, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
                  ON CONFLICT(filepath) DO UPDATE SET
-                    op           = excluded.op,
-                    content_ino  = excluded.content_ino,
-                    rename_to    = excluded.rename_to,
-                    attempt      = 0,
-                    last_error   = NULL,
-                    updated_at   = excluded.updated_at",
-                rusqlite::params![filepath, op_str, content_i64, rename_to, now_ms],
+                    op         = excluded.op,
+                    content_ino= excluded.content_ino,
+                    rename_to  = excluded.rename_to,
+                    remote_id  = COALESCE(excluded.remote_id, push_queue.remote_id),
+                    attempt    = 0,
+                    last_error = NULL,
+                    updated_at = excluded.updated_at",
+                rusqlite::params![filepath, op_str, content_i64, rename_to, remote_id, now_ms],
             );
         }
+        drop(conn);
+        self.push_notify.notify_one();
     }
 
-    /// Atomically claim the next queued job whose backoff has elapsed, marking
-    /// it inflight by stamping `inflight_started_at`. Returns None if the
-    /// queue is empty or everything is either inflight or backing off.
-    #[allow(dead_code)] // wired in M8
+    /// Atomically claim the next queued job whose backoff has elapsed.
+    /// Returns None if empty or everything is inflight / backing off.
     pub(crate) fn push_queue_claim_next(&self, now_ms: i64) -> Option<PushJob> {
         let conn = self.conn.lock();
-        let row = conn
+        let row: (
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            i64,
+        ) = conn
             .query_row(
-                "SELECT filepath, op, content_ino, rename_to, attempt
+                "SELECT filepath, op, content_ino, rename_to, remote_id, attempt
                    FROM push_queue
                   WHERE inflight_started_at IS NULL
                     AND updated_at <= ?1
@@ -320,40 +342,25 @@ impl Db {
                 [now_ms],
                 |r| {
                     Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, i64>(4)?,
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
                     ))
                 },
             )
             .ok()?;
 
-        let (filepath, op_str, content_ino, rename_to, attempt) = row;
+        let (filepath, op_str, content_ino, rename_to, remote_id, attempt) = row;
         let op = PushOp::parse(&op_str)?;
-
-        let remote_id: Option<String> = conn
-            .query_row(
-                "SELECT remote_id FROM fs_remote
-                   JOIN fs_dentry ON fs_dentry.ino = fs_remote.ino
-                  WHERE fs_dentry.name = (
-                    CASE WHEN instr(?1, '/') > 0
-                         THEN substr(?1, length(?1) - instr(reverse(?1 || '/'), '/') + 2)
-                         ELSE ?1
-                    END)",
-                [&filepath],
-                |r| r.get::<_, String>(0),
-            )
-            .ok();
 
         let updated = conn.execute(
             "UPDATE push_queue
-                SET inflight_started_at = ?2,
-                    inflight_remote_id  = ?3
-              WHERE filepath = ?1
-                AND inflight_started_at IS NULL",
-            rusqlite::params![filepath, now_ms, remote_id],
+                SET inflight_started_at = ?2
+              WHERE filepath = ?1 AND inflight_started_at IS NULL",
+            rusqlite::params![filepath, now_ms],
         );
         if matches!(updated, Ok(0) | Err(_)) {
             return None;
@@ -364,25 +371,21 @@ impl Db {
             op,
             content_ino: content_ino.map(|n| n as u64),
             rename_to,
+            remote_id,
             attempt,
-            inflight_remote_id: remote_id,
         })
     }
 
-    /// Stamp the remote_id that came back from a create. Used so the inflight
-    /// poller can GET /v3/documents/:id while this job is still processing.
-    #[allow(dead_code)] // wired in M8
+    /// After a CREATE succeeds, stamp the returned remote_id onto the row.
     pub(crate) fn push_queue_set_remote_id(&self, filepath: &str, remote_id: &str) {
         let conn = self.conn.lock();
         let _ = conn.execute(
-            "UPDATE push_queue SET inflight_remote_id = ?2 WHERE filepath = ?1",
+            "UPDATE push_queue SET remote_id = ?2 WHERE filepath = ?1",
             rusqlite::params![filepath, remote_id],
         );
     }
 
-    /// Mark a successful push. If a pending op is queued, promote it into the
-    /// primary slot; otherwise delete the row.
-    #[allow(dead_code)] // wired in M8
+    /// Success: promote pending to main if any, else delete row.
     pub(crate) fn push_queue_finalize_success(&self, filepath: &str, now_ms: i64) {
         let conn = self.conn.lock();
         let pending: Option<(String, Option<i64>, Option<String>)> = conn
@@ -396,6 +399,8 @@ impl Db {
             .and_then(|(op, c, r)| op.map(|o| (o, c, r)));
 
         if let Some((op, content_ino, rename_to)) = pending {
+            // rename_to in pending indicates a rename op; if main slot's remote_id
+            // is set (create completed), carry it forward.
             let _ = conn.execute(
                 "UPDATE push_queue
                     SET op                  = ?2,
@@ -405,7 +410,6 @@ impl Db {
                         pending_content_ino = NULL,
                         pending_rename_to   = NULL,
                         inflight_started_at = NULL,
-                        inflight_remote_id  = NULL,
                         attempt             = 0,
                         last_error          = NULL,
                         updated_at          = ?5
@@ -417,9 +421,7 @@ impl Db {
         }
     }
 
-    /// Mark a failed push. Clears the inflight marker, increments attempt,
-    /// and pushes `updated_at` forward by `backoff_ms` so the worker waits.
-    #[allow(dead_code)] // wired in M8
+    /// Failure: clear inflight marker, bump attempt, delay updated_at by backoff.
     pub(crate) fn push_queue_finalize_failure(
         &self,
         filepath: &str,
@@ -431,7 +433,6 @@ impl Db {
         let _ = conn.execute(
             "UPDATE push_queue
                 SET inflight_started_at = NULL,
-                    inflight_remote_id  = NULL,
                     attempt             = attempt + 1,
                     last_error          = ?2,
                     updated_at          = ?3
@@ -440,12 +441,89 @@ impl Db {
         );
     }
 
-    /// Return all rows currently inflight. Used by Loop B to poll status.
-    #[allow(dead_code)] // wired in M8
+    /// Drop a row entirely — for when a CREATE op is superseded by a DELETE
+    /// and the worker decides the row can vanish without ever being sent.
+    #[allow(dead_code)] // used by worker heuristics in future
+    pub(crate) fn push_queue_drop(&self, filepath: &str) {
+        let conn = self.conn.lock();
+        let _ = conn.execute("DELETE FROM push_queue WHERE filepath = ?1", [filepath]);
+    }
+
+    /// On 404 from the server: clear the pushed remote_id from both
+    /// `push_queue` and `fs_remote` so the next retry creates a fresh doc.
+    pub(crate) fn clear_remote_id_after_404(&self, filepath: &str, remote_id: &str) {
+        let conn = self.conn.lock();
+        let _ = conn.execute(
+            "UPDATE push_queue SET remote_id = NULL WHERE filepath = ?1",
+            [filepath],
+        );
+        let _ = conn.execute("DELETE FROM fs_remote WHERE remote_id = ?1", [remote_id]);
+    }
+
+    /// Read all chunks for an inode concatenated into a single byte vec.
+    /// Used by the push worker when sending file content.
+    pub(crate) fn read_all_content(&self, ino: u64) -> Vec<u8> {
+        let conn = self.conn.lock();
+        let size: i64 = match conn.query_row(
+            "SELECT size FROM fs_inode WHERE ino = ?1",
+            [ino as i64],
+            |r| r.get(0),
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        if size <= 0 {
+            return Vec::new();
+        }
+        let mut stmt = match conn
+            .prepare("SELECT data FROM fs_data WHERE ino = ?1 ORDER BY chunk_index ASC")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<u8> = Vec::with_capacity(size as usize);
+        if let Ok(rows) = stmt.query_map([ino as i64], |r| r.get::<_, Vec<u8>>(0)) {
+            for row in rows.flatten() {
+                out.extend_from_slice(&row);
+            }
+        }
+        out.truncate(size as usize);
+        out
+    }
+
+    /// Inodes whose server-side processing has not reached `done`. Drives the
+    /// status poller (loop E) and stuck detection.
+    pub(crate) fn inodes_awaiting_done(&self) -> Vec<AwaitingDone> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT ino, remote_id, last_status, last_status_at
+               FROM fs_remote
+              WHERE remote_id IS NOT NULL
+                AND (last_status IS NULL OR last_status != 'done')",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let iter = stmt.query_map([], |r| {
+            Ok(AwaitingDone {
+                ino: r.get::<_, i64>(0)? as u64,
+                remote_id: r.get(1)?,
+                last_status: r.get(2)?,
+                last_status_at: r.get(3)?,
+            })
+        });
+        match iter {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Rows currently inflight — drives the inflight status poller.
+    #[allow(dead_code)] // kept for future deep diagnostics
     pub(crate) fn push_queue_inflight(&self) -> Vec<InflightRow> {
         let conn = self.conn.lock();
         let mut stmt = match conn.prepare(
-            "SELECT filepath, inflight_remote_id, inflight_started_at, attempt
+            "SELECT filepath, remote_id, inflight_started_at, attempt
                FROM push_queue
               WHERE inflight_started_at IS NOT NULL",
         ) {
@@ -466,8 +544,7 @@ impl Db {
         }
     }
 
-    /// Count rows that still have work to do (either pending or inflight).
-    #[allow(dead_code)] // wired in M8
+    /// Rows with any pending work (main or pending slot). For unmount drain.
     pub(crate) fn push_queue_len(&self) -> usize {
         let conn = self.conn.lock();
         conn.query_row("SELECT COUNT(*) FROM push_queue", [], |r| {
@@ -478,7 +555,6 @@ impl Db {
     }
 }
 
-#[allow(dead_code)] // wired in M8
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PushOp {
     Create,
@@ -508,24 +584,31 @@ impl PushOp {
     }
 }
 
-#[allow(dead_code)] // wired in M8
 #[derive(Debug)]
 pub(crate) struct PushJob {
     pub filepath: String,
     pub op: PushOp,
     pub content_ino: Option<u64>,
     pub rename_to: Option<String>,
+    pub remote_id: Option<String>,
     pub attempt: i64,
-    pub inflight_remote_id: Option<String>,
 }
 
-#[allow(dead_code)] // wired in M8
 #[derive(Debug)]
+#[allow(dead_code)] // fields read by deep diagnostics
 pub(crate) struct InflightRow {
     pub filepath: String,
     pub remote_id: Option<String>,
     pub started_at: i64,
     pub attempt: i64,
+}
+
+#[derive(Debug)]
+pub(crate) struct AwaitingDone {
+    pub ino: u64,
+    pub remote_id: String,
+    pub last_status: Option<String>,
+    pub last_status_at: Option<i64>,
 }
 
 impl Db {

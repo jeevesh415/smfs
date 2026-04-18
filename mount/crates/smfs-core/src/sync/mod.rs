@@ -1,19 +1,22 @@
 //! Background sync engine.
 //!
-//! Two loops today:
+//! Four loops:
 //!
-//! - **Delta pull** — every ~30s, walk `/v3/documents/list` sorted by
+//! - **Loop A — delta pull.** Every ~30s, walk `/v3/documents/list` sorted by
 //!   `updatedAt desc` and reconcile anything newer than our watermark into
 //!   the local cache.
-//! - **Deletion scan** — every ~5min, diff the full remote ID set against
-//!   the local `fs_remote` table and unlink anything that disappeared.
-//!
-//! The push queue (write-side coalescing, inflight status polling, unmount
-//! drain) is a planned follow-up; the schema and DB helpers for it already
-//! exist in `cache/db.rs` so layering it on top won't require structural
-//! change.
+//! - **Loop C — deletion scan.** Every ~5min, diff the full remote ID set
+//!   against the local `fs_remote` table and unlink anything that
+//!   disappeared.
+//! - **Loop D — push worker.** Claims queued push jobs from `push_queue`
+//!   and sends them; coalesces rapid writes to at most 2 server requests
+//!   per filepath (one inflight + one pending).
+//! - **Loop E — inflight poller.** Polls `GET /v3/documents/:id` for docs
+//!   whose server-side processing hasn't flipped to `done` yet; updates
+//!   `mirrored_updated_at` and emits INFO/WARN/STOP tiers when stuck.
 
 pub mod pull;
+pub mod push;
 pub mod scan;
 
 use std::sync::Arc;
@@ -55,8 +58,9 @@ impl SyncEngine {
         Ok((removed, reconciled))
     }
 
-    /// Spawn loops A (delta pull) and C (deletion scan). Returns a JoinSet
-    /// whose tasks exit when `shutdown.send(true)` is called.
+    /// Spawn loops A (delta pull), C (deletion scan), D (push worker), and
+    /// E (inflight status poller). Returns a JoinSet whose tasks exit when
+    /// `shutdown.send(true)` is called.
     pub fn start(
         fs: Arc<SupermemoryFs>,
         opts: SyncOptions,
@@ -74,6 +78,18 @@ impl SyncEngine {
         let mut sd_c = shutdown.clone();
         set.spawn(async move {
             run_deletion_loop(fs_c, opts.deletion_scan_interval, &mut sd_c).await;
+        });
+
+        let fs_d = fs.clone();
+        let sd_d = shutdown.clone();
+        set.spawn(async move {
+            push::run_push_worker(fs_d, sd_d).await;
+        });
+
+        let fs_e = fs.clone();
+        let sd_e = shutdown.clone();
+        set.spawn(async move {
+            push::run_inflight_poller(fs_e, sd_e).await;
         });
 
         set
