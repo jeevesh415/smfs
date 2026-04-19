@@ -25,6 +25,7 @@ pub mod mount;
 pub mod status;
 pub mod sync;
 pub mod unmount;
+pub mod whoami;
 
 /// All user-facing subcommands, plus the hidden `daemon-inner` used when
 /// the CLI forks itself into a background process in M10.
@@ -32,6 +33,9 @@ pub mod unmount;
 pub enum Command {
     /// Authenticate with Supermemory (prefer `supermemory login` from the TS CLI)
     Login(login::Args),
+
+    /// Show the currently-authenticated user, org, and API endpoint
+    Whoami(whoami::Args),
 
     /// Mount a Supermemory container at a local path
     Mount(mount::Args),
@@ -69,6 +73,7 @@ pub enum Command {
 pub async fn dispatch(cmd: Command) -> Result<()> {
     match cmd {
         Command::Login(args) => login::run(args).await,
+        Command::Whoami(args) => whoami::run(args).await,
         Command::Mount(args) => mount::run(args).await,
         Command::Grep(args) => grep::run(args).await,
         Command::Init(args) => init::run(args).await,

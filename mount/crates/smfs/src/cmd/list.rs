@@ -26,7 +26,7 @@ pub async fn run() -> Result<()> {
                     pid,
                     uptime_secs,
                     queue_len,
-                    pull_enabled: _,
+                    ..
                 }) => rows.push((tag, mount_path, pid, uptime_secs, queue_len)),
                 Ok(_) | Err(_) => {
                     // Stale socket — cleanup sweep is the mount command's job.

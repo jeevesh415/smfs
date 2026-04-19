@@ -30,11 +30,23 @@ pub async fn run(args: Args) -> Result<()> {
             uptime_secs,
             queue_len,
             pull_enabled,
+            user_id,
+            user_name,
+            org_name,
         } => {
             if args.json {
-                println!(
-                    "{{\"tag\":\"{tag}\",\"mount_path\":\"{mount_path}\",\"pid\":{pid},\"uptime_secs\":{uptime_secs},\"queue_len\":{queue_len},\"pull_enabled\":{pull_enabled}}}"
-                );
+                let out = serde_json::json!({
+                    "tag": tag,
+                    "mount_path": mount_path,
+                    "pid": pid,
+                    "uptime_secs": uptime_secs,
+                    "queue_len": queue_len,
+                    "pull_enabled": pull_enabled,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "org_name": org_name,
+                });
+                println!("{}", serde_json::to_string(&out)?);
             } else {
                 println!("tag:          {tag}");
                 println!("mount path:   {mount_path}");
@@ -42,6 +54,15 @@ pub async fn run(args: Args) -> Result<()> {
                 println!("uptime:       {uptime_secs}s");
                 println!("push queue:   {queue_len} pending");
                 println!("pull enabled: {pull_enabled}");
+                if let Some(u) = &user_name {
+                    println!("user:         {u}");
+                }
+                if let Some(uid) = &user_id {
+                    println!("user id:      {uid}");
+                }
+                if let Some(o) = &org_name {
+                    println!("org:          {o}");
+                }
             }
             Ok(())
         }

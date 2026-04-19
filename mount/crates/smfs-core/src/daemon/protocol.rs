@@ -30,6 +30,12 @@ pub enum Response {
         uptime_secs: u64,
         queue_len: usize,
         pull_enabled: bool,
+        #[serde(default)]
+        user_id: Option<String>,
+        #[serde(default)]
+        user_name: Option<String>,
+        #[serde(default)]
+        org_name: Option<String>,
     },
     SyncDone {
         pulled: usize,

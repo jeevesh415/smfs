@@ -18,6 +18,9 @@ pub struct IpcState {
     pub fs: Arc<SupermemoryFs>,
     pub started_at: Instant,
     pub pull_enabled: bool,
+    pub user_id: Option<String>,
+    pub user_name: Option<String>,
+    pub org_name: Option<String>,
     /// Fired when an `Unmount` request arrives — daemon main loop awaits this
     /// and treats it the same as SIGTERM.
     pub shutdown_notify: Arc<Notify>,
@@ -96,6 +99,9 @@ async fn dispatch(req: Request, state: &IpcState) -> Response {
             uptime_secs: state.started_at.elapsed().as_secs(),
             queue_len: state.fs.push_queue_len(),
             pull_enabled: state.pull_enabled,
+            user_id: state.user_id.clone(),
+            user_name: state.user_name.clone(),
+            org_name: state.org_name.clone(),
         },
         Request::Sync => {
             let pulled = crate::sync::pull::delta_pull(&state.fs).await.unwrap_or(0);

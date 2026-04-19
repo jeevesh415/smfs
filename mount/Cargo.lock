@@ -1411,6 +1411,7 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "serde_json",
  "smfs-core",
  "tokio",
  "tracing",

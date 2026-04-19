@@ -39,6 +39,9 @@ pub struct ApiClient {
 pub struct SessionInfo {
     pub org_name: String,
     pub user_id: Option<String>,
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+    pub plan: Option<String>,
 }
 
 impl std::fmt::Debug for ApiClient {
@@ -126,8 +129,25 @@ impl ApiClient {
             .and_then(|u| u.get("id"))
             .and_then(|v| v.as_str())
             .map(String::from);
+        let user_name = body
+            .get("user")
+            .and_then(|u| u.get("name"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let user_email = body
+            .get("user")
+            .and_then(|u| u.get("email"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let plan = body.get("plan").and_then(|v| v.as_str()).map(String::from);
 
-        Ok(SessionInfo { org_name, user_id })
+        Ok(SessionInfo {
+            org_name,
+            user_id,
+            user_name,
+            user_email,
+            plan,
+        })
     }
 
     /// List documents, optionally filtered by filepath prefix or exact match.

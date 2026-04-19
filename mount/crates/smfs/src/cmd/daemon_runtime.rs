@@ -83,7 +83,9 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
         Arc::new(Db::open(&db_path)?)
     };
 
-    // Session lookup → user id for metadata attribution. Best-effort.
+    // Session lookup → user id for metadata attribution, and for `smfs
+    // status` to display who the mount is attributing writes to.
+    // Best-effort.
     let session = smfs_core::api::ApiClient::validate_key(&cfg.api_url, &cfg.api_key)
         .await
         .ok();
@@ -93,6 +95,9 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
         api_client = api_client.with_user_id(uid);
     }
     let api = Arc::new(api_client);
+    let session_user_id = session.as_ref().and_then(|s| s.user_id.clone());
+    let session_user_name = session.as_ref().and_then(|s| s.user_name.clone());
+    let session_org_name = session.as_ref().map(|s| s.org_name.clone());
 
     if let Some(raw) = &cfg.memory_paths {
         let paths: Vec<String> = if raw.is_empty() {
@@ -149,6 +154,9 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
         fs: fs.clone(),
         started_at: Instant::now(),
         pull_enabled: !cfg.no_sync,
+        user_id: session_user_id,
+        user_name: session_user_name,
+        org_name: session_org_name,
         shutdown_notify: ipc_shutdown_notify.clone(),
     });
     let socket_path = daemon::socket_path(&cfg.container_tag);

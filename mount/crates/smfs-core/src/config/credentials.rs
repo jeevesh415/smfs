@@ -61,6 +61,14 @@ pub fn save_project(mount_path: &Path, creds: &Credentials) -> Result<()> {
     write_json(&project_path(mount_path), creds)
 }
 
+pub fn load_project(mount_path: &Path) -> Option<Credentials> {
+    load_json(&project_path(mount_path))
+}
+
+pub fn load_global() -> Option<Credentials> {
+    load_json(&global_path())
+}
+
 pub fn resolve(mount_path: Option<&Path>) -> Option<Credentials> {
     if let Some(p) = mount_path {
         if let Some(c) = load_json(&project_path(p)) {
