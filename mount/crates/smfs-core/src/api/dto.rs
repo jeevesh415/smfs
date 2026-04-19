@@ -83,6 +83,14 @@ pub struct ListDocumentsResp {
     pub pagination: Pagination,
 }
 
+/// Response from GET /v3/documents/processing
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessingDocumentsResp {
+    pub documents: Vec<Document>,
+    pub total_count: u32,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pagination {

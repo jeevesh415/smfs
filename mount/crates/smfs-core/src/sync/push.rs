@@ -255,21 +255,6 @@ async fn process_job(fs: &Arc<SupermemoryFs>, job: crate::cache::db::PushJob) {
     }
 }
 
-/// Pick the next poll delay for a row whose POST landed `age_ms` ago.
-fn status_poll_delay(age_ms: i64) -> Duration {
-    if age_ms < 10_000 {
-        Duration::from_secs(1)
-    } else if age_ms < 30_000 {
-        Duration::from_secs(2)
-    } else if age_ms < 120_000 {
-        Duration::from_secs(5)
-    } else if age_ms < 600_000 {
-        Duration::from_secs(15)
-    } else {
-        Duration::from_secs(60)
-    }
-}
-
 /// Stuck-detection tier based on how long the row has been awaiting `done`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StuckTier {
@@ -291,8 +276,11 @@ fn stuck_tier(age_ms: i64) -> StuckTier {
     }
 }
 
-/// Run loop E: the inflight status poller. Walks every fs_remote row whose
-/// server-side processing hasn't reached `done` and updates its status.
+/// Run loop E: the inflight status poller. One
+/// `GET /v3/documents/processing` per tick — regardless of how many
+/// docs are currently in flight — tells us the set of still-processing
+/// ids. Anything local that's no longer in that set has reached a
+/// terminal state; we issue a per-id GET only in that transition case.
 pub async fn run_inflight_poller(fs: Arc<SupermemoryFs>, mut shutdown: watch::Receiver<bool>) {
     if fs.api().is_none() {
         return;
@@ -312,17 +300,27 @@ pub async fn run_inflight_poller(fs: Arc<SupermemoryFs>, mut shutdown: watch::Re
             continue;
         }
 
-        let now = now_ms();
-        for row in rows {
-            // Age is since last_status_at (when we last POSTed/checked). If
-            // never set, treat as just-started so we poll sooner rather than
-            // later.
-            let age = row.last_status_at.map(|t| now - t).unwrap_or(0);
-            let want_delay = status_poll_delay(age);
-            if age < want_delay.as_millis() as i64 {
+        let processing = match api.get_processing_documents().await {
+            Ok(docs) => {
+                tracing::debug!(
+                    returned = docs.len(),
+                    tracked = rows.len(),
+                    "inflight bulk poll"
+                );
+                docs
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "inflight bulk poll failed");
                 continue;
             }
+        };
+        let processing_map: std::collections::HashMap<&str, &crate::api::Document> =
+            processing.iter().map(|d| (d.id.as_str(), d)).collect();
 
+        let now = now_ms();
+        for row in rows {
+            // Stuck tiers key on age since last observation, same as before.
+            let age = row.last_status_at.map(|t| now - t).unwrap_or(0);
             match stuck_tier(age) {
                 StuckTier::Stop => {
                     tracing::error!(
@@ -355,9 +353,15 @@ pub async fn run_inflight_poller(fs: Arc<SupermemoryFs>, mut shutdown: watch::Re
                 StuckTier::Ok => {}
             }
 
-            match api.get_document(&row.remote_id).await {
-                Ok(doc) => {
-                    if doc.status == "done" {
+            if let Some(doc) = processing_map.get(row.remote_id.as_str()) {
+                // Still in the processing list — update status; mirrored_at
+                // stays unchanged (we only advance it when done is confirmed).
+                db.set_mirrored_state(row.ino, None, Some(&doc.status), Some(now));
+            } else {
+                // Disappeared from the processing list — terminal state.
+                // Fall back to a single GET to learn which terminal.
+                match api.get_document(&row.remote_id).await {
+                    Ok(doc) if doc.status == "done" => {
                         let mirrored = crate::cache::parse_iso_to_ms(&doc.updated_at);
                         db.set_mirrored_state(row.ino, mirrored, Some("done"), Some(now));
                         tracing::debug!(
@@ -365,26 +369,27 @@ pub async fn run_inflight_poller(fs: Arc<SupermemoryFs>, mut shutdown: watch::Re
                             remote_id = %row.remote_id,
                             "push: status done"
                         );
-                    } else {
+                    }
+                    Ok(doc) => {
                         db.set_mirrored_state(row.ino, None, Some(&doc.status), Some(now));
                     }
-                }
-                Err(ApiError::NotFound) => {
-                    tracing::warn!(
-                        ino = row.ino,
-                        remote_id = %row.remote_id,
-                        "push: status poll 404; remote doc vanished"
-                    );
-                    db.delete_remote_id(row.ino);
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        ino = row.ino,
-                        remote_id = %row.remote_id,
-                        error = %e,
-                        "push: status poll error"
-                    );
-                    db.set_mirrored_state(row.ino, None, None, Some(now));
+                    Err(ApiError::NotFound) => {
+                        tracing::warn!(
+                            ino = row.ino,
+                            remote_id = %row.remote_id,
+                            "push: terminal-state GET 404; remote doc vanished"
+                        );
+                        db.delete_remote_id(row.ino);
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            ino = row.ino,
+                            remote_id = %row.remote_id,
+                            error = %e,
+                            "push: terminal-state GET error"
+                        );
+                        db.set_mirrored_state(row.ino, None, None, Some(now));
+                    }
                 }
             }
         }

@@ -203,6 +203,25 @@ impl ApiClient {
             .await
     }
 
+    /// List every document in this container tag whose server-side
+    /// processing isn't yet `done` (or `failed`). Returns up to the
+    /// server's 4-hour staleness cutoff.
+    ///
+    /// One bulk request replaces N per-id GETs in the inflight poller.
+    pub async fn get_processing_documents(&self) -> Result<Vec<Document>, ApiError> {
+        let path = format!(
+            "/v3/documents/processing?containerTag={}",
+            self.container_tag
+        );
+        let resp: ProcessingDocumentsResp = self
+            .get(&path)
+            .send_with_retry()
+            .await?
+            .parse_json()
+            .await?;
+        Ok(resp.documents)
+    }
+
     /// Create a new document with content and filepath. The request is
     /// stamped with `metadata.source = "supermemoryfs"` (plus
     /// `metadata.lastEditedBy` when a user id is available) for attribution.
