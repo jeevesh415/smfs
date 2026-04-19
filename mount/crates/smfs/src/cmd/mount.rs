@@ -94,14 +94,15 @@ pub async fn run(args: Args) -> Result<()> {
             .join(&args.container_tag)
     });
 
-    // 3. Resolve API url + key up-front (in the parent) so we can pass them
-    //    to the daemon child as flags.
+    let api_key = super::auth::resolve_api_key(args.key.as_deref(), Some(&mount_path))?;
     let api_url_str = args
         .api_url
-        .as_deref()
-        .unwrap_or("https://api.supermemory.ai")
-        .to_string();
-    let api_key = super::auth::resolve_api_key(args.key.as_deref(), Some(&mount_path))?;
+        .clone()
+        .or_else(|| {
+            smfs_core::config::credentials::load_project(&mount_path).and_then(|c| c.api_url)
+        })
+        .or_else(|| smfs_core::config::credentials::load_global().and_then(|c| c.api_url))
+        .unwrap_or_else(|| "https://api.supermemory.ai".to_string());
 
     // Auto-save project credentials if --key was explicit.
     if args.key.is_some() {
