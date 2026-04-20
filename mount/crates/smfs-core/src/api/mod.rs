@@ -318,6 +318,22 @@ impl ApiClient {
             .await
     }
 
+    /// Bulk delete documents by remote id.
+    pub async fn delete_documents_by_ids(&self, ids: &[&str]) -> Result<BulkDeleteResp, ApiError> {
+        let body = BulkDeleteReq {
+            ids: Some(ids.iter().map(|s| s.to_string()).collect()),
+            container_tags: Some(vec![self.container_tag.clone()]),
+            filepath: None,
+        };
+
+        self.delete("/v3/documents/bulk")
+            .json(&body)
+            .send_with_retry()
+            .await?
+            .parse_json()
+            .await
+    }
+
     /// Semantic search across memories and chunks.
     pub async fn search(
         &self,

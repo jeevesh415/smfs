@@ -209,22 +209,18 @@ impl SupermemoryFs {
     /// `updatedAt`, skip (local write in progress wins). Otherwise create,
     /// rename, or rewrite chunks as needed.
     pub(crate) fn reconcile_one(&self, doc: &crate::api::Document) -> VfsResult<ReconcileOutcome> {
-        let filepath = match doc.filepath.as_deref() {
-            Some(fp) if !fp.is_empty() => fp,
-            _ => return Ok(ReconcileOutcome::Skipped),
+        let synth;
+        let filepath: &str = match doc.filepath.as_deref() {
+            Some(fp) if fp.contains('/') && !fp.ends_with('/') => fp,
+            _ => {
+                synth = format!("/{}.md", doc.id);
+                &synth
+            }
         };
 
-        let (dir, filename) = match filepath.rfind('/') {
-            Some(pos) => {
-                let dir = if pos == 0 { "/" } else { &filepath[..pos] };
-                let name = &filepath[pos + 1..];
-                (dir, name)
-            }
-            None => return Ok(ReconcileOutcome::Skipped),
-        };
-        if filename.is_empty() {
-            return Ok(ReconcileOutcome::Skipped);
-        }
+        let pos = filepath.rfind('/').expect("synth guarantees a '/'");
+        let dir = if pos == 0 { "/" } else { &filepath[..pos] };
+        let filename = &filepath[pos + 1..];
 
         let updated_ms = parse_iso_to_ms(&doc.updated_at);
 
@@ -582,8 +578,6 @@ pub enum ReconcileOutcome {
     /// Remote doc is still being processed; wait for next poll to bring the
     /// final version.
     DeferredProcessing,
-    /// Doc has no usable filepath.
-    Skipped,
 }
 
 impl std::fmt::Debug for SupermemoryFs {

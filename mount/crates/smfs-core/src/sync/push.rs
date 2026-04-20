@@ -214,18 +214,24 @@ async fn process_job(fs: &Arc<SupermemoryFs>, job: crate::cache::db::PushJob) {
             }
         }
 
-        PushOp::Delete => match api.delete_documents(&job.filepath).await {
-            Ok(r) => {
-                tracing::debug!(filepath = %job.filepath, deleted = r.deleted_count, "push: DELETE ok");
-                db.push_queue_finalize_success(&job.filepath, now_ms());
-                db.push_notify().notify_one();
+        PushOp::Delete => {
+            let result = match job.remote_id.as_deref() {
+                Some(rid) => api.delete_documents_by_ids(&[rid]).await,
+                None => api.delete_documents(&job.filepath).await,
+            };
+            match result {
+                Ok(r) => {
+                    tracing::debug!(filepath = %job.filepath, remote_id = ?job.remote_id, deleted = r.deleted_count, "push: DELETE ok");
+                    db.push_queue_finalize_success(&job.filepath, now_ms());
+                    db.push_notify().notify_one();
+                }
+                Err(e) => {
+                    let bo = backoff_ms(job.attempt);
+                    tracing::warn!(filepath = %job.filepath, attempt = job.attempt, backoff_ms = bo, error = %e, "push: DELETE failed");
+                    db.push_queue_finalize_failure(&job.filepath, &e.to_string(), now_ms(), bo);
+                }
             }
-            Err(e) => {
-                let bo = backoff_ms(job.attempt);
-                tracing::warn!(filepath = %job.filepath, attempt = job.attempt, backoff_ms = bo, error = %e, "push: DELETE failed");
-                db.push_queue_finalize_failure(&job.filepath, &e.to_string(), now_ms(), bo);
-            }
-        },
+        }
 
         PushOp::Rename => {
             let Some(new_fp) = job.rename_to.clone() else {
