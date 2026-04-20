@@ -875,4 +875,36 @@ mod tests {
             "normal path must enqueue"
         );
     }
+
+    #[test]
+    fn push_queue_claim_respects_debounce() {
+        let db = Db::open_in_memory().unwrap();
+        // Caller stamps updated_at = T + 500 to simulate a flush-debounce.
+        db.push_queue_upsert("/bar.md", PushOp::Create, None, None, None, 500);
+        assert!(db.push_queue_claim_next(0).is_none(), "before debounce");
+        assert!(
+            db.push_queue_claim_next(499).is_none(),
+            "still before debounce"
+        );
+        assert!(
+            db.push_queue_claim_next(500).is_some(),
+            "exactly at debounce boundary must claim"
+        );
+    }
+
+    #[test]
+    fn push_queue_upsert_resets_debounce_window() {
+        let db = Db::open_in_memory().unwrap();
+        // Simulate two flushes ~100 ms apart; second resets the wake time.
+        db.push_queue_upsert("/bar.md", PushOp::Create, None, None, None, 600);
+        db.push_queue_upsert("/bar.md", PushOp::Create, None, None, None, 700);
+        assert!(
+            db.push_queue_claim_next(600).is_none(),
+            "second flush pushed window forward"
+        );
+        assert!(
+            db.push_queue_claim_next(700).is_some(),
+            "expires at later time"
+        );
+    }
 }

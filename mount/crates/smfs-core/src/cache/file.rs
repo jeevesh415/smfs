@@ -10,6 +10,12 @@ use crate::vfs::{FileAttr, Timestamp, VfsError, VfsResult};
 /// Per-file cap. Matches the Cloudflare Workers paid-tier request limit.
 pub(crate) const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
+/// Delay after a flush before the push worker may claim the row. NFS
+/// splits a paste into ~4 WRITE RPCs (one flush each); without this
+/// debounce the worker POSTs partial content, then POSTs again when
+/// pending promotes — producing a duplicate server doc.
+const PUSH_DEBOUNCE_MS: i64 = 500;
+
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -312,7 +318,7 @@ impl crate::vfs::File for SqliteFile {
             Some(self.ino),
             None,
             existing_remote_id.as_deref(),
-            now_ms(),
+            now_ms() + PUSH_DEBOUNCE_MS,
         );
 
         tracing::debug!(filepath, op = op.as_str(), "enqueued push (flush)",);
