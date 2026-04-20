@@ -172,7 +172,10 @@ pub async fn run(args: Args) -> Result<()> {
     );
     eprintln!();
 
-    for result in &resp.results {
+    for (i, result) in resp.results.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
         let fp = result.filepath.as_deref().unwrap_or("(unknown)");
         let content = result
             .memory
@@ -180,14 +183,12 @@ pub async fn run(args: Args) -> Result<()> {
             .or(result.chunk.as_deref())
             .unwrap_or("");
 
-        let preview = content.lines().next().unwrap_or(content);
-        let preview = if preview.len() > 200 {
-            &preview[..200]
-        } else {
-            preview
-        };
+        let escaped = content
+            .replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
 
-        println!("{}:  {}", fp, preview);
+        println!("{}:{}", fp, escaped);
     }
 
     Ok(())
