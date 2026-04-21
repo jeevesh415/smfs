@@ -1792,7 +1792,7 @@ impl FileSystem for SupermemoryFs {
         });
 
         // All DB work in a block so conn/tx are dropped before any .await.
-        let (src_ino, did_overwrite) = {
+        let (src_ino, did_overwrite, dst_remote_id) = {
             let conn = self.db.conn.lock();
 
             // Find source.
@@ -1825,6 +1825,7 @@ impl FileSystem for SupermemoryFs {
                 )
                 .ok();
             let mut did_overwrite = false;
+            let mut dst_remote_id: Option<String> = None;
 
             let src_mode: i64 = conn
                 .query_row("SELECT mode FROM fs_inode WHERE ino = ?1", [src_ino], |r| {
@@ -1875,6 +1876,15 @@ impl FileSystem for SupermemoryFs {
                     .map_err(sql_err)?;
                 tx.execute("DELETE FROM fs_symlink WHERE ino = ?1", [dst_ino])
                     .map_err(sql_err)?;
+                // Capture before the DELETE so we can rebind a pending
+                // Create onto this remote_id instead of orphaning it.
+                dst_remote_id = tx
+                    .query_row(
+                        "SELECT remote_id FROM fs_remote WHERE ino = ?1",
+                        [dst_ino],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok();
                 tx.execute("DELETE FROM fs_remote WHERE ino = ?1", [dst_ino])
                     .map_err(sql_err)?;
                 tx.execute("DELETE FROM fs_inode WHERE ino = ?1", [dst_ino])
@@ -1919,7 +1929,7 @@ impl FileSystem for SupermemoryFs {
 
             tx.commit().map_err(sql_err)?;
 
-            (src_ino, did_overwrite)
+            (src_ino, did_overwrite, dst_remote_id)
         }; // conn + tx dropped here
 
         {
@@ -1935,35 +1945,55 @@ impl FileSystem for SupermemoryFs {
             format!("{p}{sep}{new_name}")
         });
 
-        // Delete overwritten destination via the push queue.
-        if did_overwrite && self.api.is_some() {
-            if let Some(dst_fp) = dst_filepath_for_delete {
-                self.db.push_queue_upsert(
-                    &dst_fp,
-                    super::db::PushOp::Delete,
-                    None,
-                    None,
-                    None,
-                    now_ms(),
-                );
-                tracing::debug!(filepath = %dst_fp, "enqueued push (rename overwrote)");
-            }
-        }
-
-        // Enqueue rename via the push queue. The worker looks up the doc by
-        // old filepath and PATCHes its `filepath` to new.
+        // Atomic-save editors do `write(tmp) + rename(tmp, final)` inside
+        // the push debounce window; a Rename upsert coalesces over the
+        // pending Create and drops `content_ino`. Retarget the Create
+        // row instead so its content survives the rename.
         if self.api.is_some() {
-            if let (Some(old_fp), Some(new_fp)) = (old_filepath, new_filepath) {
-                let remote_id = self.db.get_remote_id(src_ino as u64);
-                self.db.push_queue_upsert(
-                    &old_fp,
-                    super::db::PushOp::Rename,
-                    None,
-                    Some(&new_fp),
-                    remote_id.as_deref(),
+            if let (Some(old_fp), Some(new_fp)) = (old_filepath.as_deref(), new_filepath.as_deref())
+            {
+                let retargeted = self.db.push_queue_retarget_pending_create(
+                    old_fp,
+                    new_fp,
+                    dst_remote_id.as_deref(),
                     now_ms(),
                 );
-                tracing::debug!(old = %old_fp, new = %new_fp, "enqueued push (rename)");
+
+                if retargeted {
+                    if let Some(rid) = dst_remote_id.as_deref() {
+                        self.db.set_remote_id(src_ino as u64, rid);
+                    }
+                    tracing::debug!(
+                        old = %old_fp,
+                        new = %new_fp,
+                        rebind = ?dst_remote_id,
+                        "retargeted pending create across rename"
+                    );
+                } else {
+                    if did_overwrite {
+                        if let Some(dst_fp) = dst_filepath_for_delete.as_deref() {
+                            self.db.push_queue_upsert(
+                                dst_fp,
+                                super::db::PushOp::Delete,
+                                None,
+                                None,
+                                None,
+                                now_ms(),
+                            );
+                            tracing::debug!(filepath = %dst_fp, "enqueued push (rename overwrote)");
+                        }
+                    }
+                    let remote_id = self.db.get_remote_id(src_ino as u64);
+                    self.db.push_queue_upsert(
+                        old_fp,
+                        super::db::PushOp::Rename,
+                        None,
+                        Some(new_fp),
+                        remote_id.as_deref(),
+                        now_ms(),
+                    );
+                    tracing::debug!(old = %old_fp, new = %new_fp, "enqueued push (rename)");
+                }
             }
         }
 

@@ -329,6 +329,56 @@ impl Db {
         self.push_notify.notify_one();
     }
 
+    /// Move a not-yet-inflight `create`/`upload_binary` row from `old_fp`
+    /// to `new_fp`, optionally stamping an existing `remote_id` onto it so
+    /// the worker PATCHes instead of POSTs. Returns `true` if moved.
+    pub(crate) fn push_queue_retarget_pending_create(
+        &self,
+        old_fp: &str,
+        new_fp: &str,
+        rebind_remote_id: Option<&str>,
+        now_ms: i64,
+    ) -> bool {
+        let conn = self.conn.lock();
+
+        let eligible: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM push_queue
+                  WHERE filepath = ?1
+                    AND op IN ('create','upload_binary')
+                    AND inflight_started_at IS NULL
+                    AND remote_id IS NULL",
+                [old_fp],
+                |r| r.get::<_, i64>(0).map(|n| n > 0),
+            )
+            .unwrap_or(false);
+        if !eligible {
+            return false;
+        }
+
+        let _ = conn.execute("DELETE FROM push_queue WHERE filepath = ?1", [new_fp]);
+
+        let updated = conn.execute(
+            "UPDATE push_queue
+                SET filepath   = ?1,
+                    remote_id  = COALESCE(?2, remote_id),
+                    attempt    = 0,
+                    last_error = NULL,
+                    updated_at = ?3
+              WHERE filepath = ?4
+                AND op IN ('create','upload_binary')
+                AND inflight_started_at IS NULL",
+            rusqlite::params![new_fp, rebind_remote_id, now_ms, old_fp],
+        );
+
+        if matches!(updated, Ok(1)) {
+            self.push_notify.notify_one();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Atomically claim the next queued job whose backoff has elapsed.
     /// Returns None if empty or everything is inflight / backing off.
     pub(crate) fn push_queue_claim_next(&self, now_ms: i64) -> Option<PushJob> {
