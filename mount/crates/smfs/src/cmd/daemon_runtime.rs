@@ -65,14 +65,39 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
 
     let opts = MountOpts::new(cfg.mount_path.clone(), cfg.backend).with_ownership(uid, gid);
 
-    // Open the SQLite cache.
+    let session = if cfg.ephemeral {
+        smfs_core::api::ApiClient::validate_key(&cfg.api_url, &cfg.api_key)
+            .await
+            .ok()
+    } else {
+        Some(
+            smfs_core::api::ApiClient::validate_key(&cfg.api_url, &cfg.api_key)
+                .await
+                .context("validating API key (required to scope cache by org)")?,
+        )
+    };
+
     let db = if cfg.ephemeral {
         eprintln!("using ephemeral in-memory cache (nothing persists after unmount)");
         Arc::new(Db::open_in_memory()?)
     } else {
-        let db_path = smfs_core::config::cache_db_path(&cfg.container_tag);
+        let org_id = session
+            .as_ref()
+            .and_then(|s| s.org_id.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "server did not return org id; cannot open cache. Run `smfs login` and retry."
+                )
+            })?;
+        let db_path = smfs_core::config::cache_db_path(org_id, &cfg.container_tag);
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        let legacy_path = smfs_core::config::legacy_cache_db_path(&cfg.container_tag);
+        if legacy_path.exists() && legacy_path != db_path {
+            let _ = std::fs::remove_file(&legacy_path);
+            let _ = std::fs::remove_file(legacy_path.with_extension("db-wal"));
+            let _ = std::fs::remove_file(legacy_path.with_extension("db-shm"));
         }
         if cfg.clean {
             let _ = std::fs::remove_file(&db_path);
@@ -83,12 +108,6 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
         Arc::new(Db::open(&db_path)?)
     };
 
-    // Session lookup → user id for metadata attribution, and for `smfs
-    // status` to display who the mount is attributing writes to.
-    // Best-effort.
-    let session = smfs_core::api::ApiClient::validate_key(&cfg.api_url, &cfg.api_key)
-        .await
-        .ok();
     let mut api_client =
         smfs_core::api::ApiClient::new(&cfg.api_url, &cfg.api_key, &cfg.container_tag);
     if let Some(uid) = session.as_ref().and_then(|s| s.user_id.clone()) {

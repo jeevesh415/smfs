@@ -37,6 +37,7 @@ pub struct ApiClient {
 /// `/v3/session` that the mount code cares about.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
+    pub org_id: Option<String>,
     pub org_name: String,
     pub user_id: Option<String>,
     pub user_name: Option<String>,
@@ -118,6 +119,11 @@ impl ApiClient {
         }
 
         let body: serde_json::Value = resp.json().await.map_err(ApiError::Network)?;
+        let org_id = body
+            .get("org")
+            .and_then(|o| o.get("id"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let org_name = body
             .get("org")
             .and_then(|o| o.get("name"))
@@ -142,6 +148,7 @@ impl ApiClient {
         let plan = body.get("plan").and_then(|v| v.as_str()).map(String::from);
 
         Ok(SessionInfo {
+            org_id,
             org_name,
             user_id,
             user_name,

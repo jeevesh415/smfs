@@ -21,11 +21,11 @@ pub fn cache_dir() -> PathBuf {
         })
 }
 
-/// Path to the SQLite database for a given container tag.
-///
-/// One database per container tag — mounts are per-tag and can't overlap.
-/// Returns e.g. `~/.cache/supermemoryfs/work-tag.db`
-pub fn cache_db_path(container_tag: &str) -> PathBuf {
+pub fn cache_db_path(org_id: &str, container_tag: &str) -> PathBuf {
+    cache_dir().join(org_id).join(format!("{container_tag}.db"))
+}
+
+pub fn legacy_cache_db_path(container_tag: &str) -> PathBuf {
     cache_dir().join(format!("{container_tag}.db"))
 }
 
@@ -39,13 +39,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cache_db_path_contains_tag() {
-        let path = cache_db_path("my-tag");
-        assert!(path.to_str().unwrap().contains("my-tag.db"));
+    fn cache_db_path_contains_org_and_tag() {
+        let path = cache_db_path("org123", "my-tag");
+        let s = path.to_str().unwrap();
+        assert!(s.contains("org123"));
+        assert!(s.contains("my-tag.db"));
+    }
+
+    #[test]
+    fn cache_db_path_different_orgs_differ_for_same_tag() {
+        assert_ne!(cache_db_path("orgA", "work"), cache_db_path("orgB", "work"));
     }
 
     #[test]
     fn cache_db_path_different_tags_differ() {
-        assert_ne!(cache_db_path("a"), cache_db_path("b"));
+        assert_ne!(cache_db_path("org", "a"), cache_db_path("org", "b"));
     }
 }
