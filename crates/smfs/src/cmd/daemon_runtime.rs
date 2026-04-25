@@ -65,13 +65,17 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
         .parent()
         .unwrap_or(&cfg.mount_path)
         .join(".smfs");
+    let canonical_mount = cfg
+        .mount_path
+        .canonicalize()
+        .unwrap_or_else(|_| cfg.mount_path.clone());
     std::fs::write(
         &marker_path,
         format!(
             "container_tag={}\napi_url={}\nmount_path={}\n",
             cfg.container_tag,
             cfg.api_url,
-            cfg.mount_path.display(),
+            canonical_mount.display(),
         ),
     )?;
 

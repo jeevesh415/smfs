@@ -80,27 +80,17 @@ pub async fn run(args: Args) -> Result<()> {
                     std::env::current_dir().ok()?.join(p)
                 };
                 let target = target.canonicalize().ok()?;
-                let mut dir = if target.is_dir() {
+                let dir = if target.is_dir() {
                     target
                 } else {
                     target.parent()?.to_path_buf()
                 };
-                loop {
-                    if dir.join(".smfs").exists() {
-                        // Read mount_path from the marker
-                        let content = std::fs::read_to_string(dir.join(".smfs")).ok()?;
-                        for line in content.lines() {
-                            if let Some(v) = line.strip_prefix("mount_path=") {
-                                return Path::new(v).canonicalize().ok();
-                            }
-                        }
-                        return Some(dir);
-                    }
-                    if !dir.pop() {
-                        break;
-                    }
-                }
-                None
+                let marker = super::marker::find_marker_from(&dir)?;
+                marker
+                    .mount_path
+                    .as_deref()
+                    .and_then(|v| Path::new(v).canonicalize().ok())
+                    .or(Some(dir))
             })
         });
 
