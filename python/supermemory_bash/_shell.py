@@ -1,21 +1,28 @@
 from __future__ import annotations
 
-import asyncio
 import fnmatch
 import re
-import shlex
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
-from ._errors import FsError, enoent, eisdir, enotdir, enotempty, enosys
-from ._path_index import PathIndex
-from ._volume import SupermemoryVolume, DocStat
+from ._errors import FsError
+from ._parse import (
+    Redirect,
+    UnsupportedSyntaxError,
+    parse_command,
+    expand_word,
+    expand_words,
+    extract_redirects,
+    extract_assignments,
+)
+from ._vendor.just_bash.ast.types import (
+    SimpleCommandNode,
+    PipelineNode,
+    StatementNode,
+    ScriptNode,
+)
+from ._volume import SupermemoryVolume
 
-
-# ---------------------------------------------------------------------------
-# Result type
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ExecResult:
@@ -23,232 +30,6 @@ class ExecResult:
     stderr: str = ""
     exit_code: int = 0
 
-
-# ---------------------------------------------------------------------------
-# Tokenizer
-# ---------------------------------------------------------------------------
-
-class TT(Enum):
-    WORD = auto()
-    PIPE = auto()
-    AND = auto()
-    OR = auto()
-    SEMI = auto()
-    GT = auto()
-    GTGT = auto()
-    LT = auto()
-    EOF = auto()
-
-
-@dataclass
-class Token:
-    type: TT
-    value: str = ""
-
-
-def tokenize(cmd: str, env: dict[str, str] | None = None) -> list[Token]:
-    env = env or {}
-    tokens: list[Token] = []
-    i = 0
-    n = len(cmd)
-
-    def expand_vars(s: str) -> str:
-        def repl(m: re.Match[str]) -> str:
-            name = m.group(1) or m.group(2)
-            if name == "?":
-                return env.get("?", "0")
-            return env.get(name, "")
-        return re.sub(r"\$\{([^}]+)\}|\$([A-Za-z_?][A-Za-z0-9_]*)", repl, s)
-
-    while i < n:
-        c = cmd[i]
-        if c in " \t":
-            i += 1
-            continue
-        if c == "#":
-            break
-        if c == "\n":
-            i += 1
-            tokens.append(Token(TT.SEMI))
-            continue
-
-        # Two-char operators
-        if i + 1 < n:
-            two = cmd[i : i + 2]
-            if two == "&&":
-                tokens.append(Token(TT.AND))
-                i += 2
-                continue
-            if two == "||":
-                tokens.append(Token(TT.OR))
-                i += 2
-                continue
-            if two == ">>":
-                tokens.append(Token(TT.GTGT))
-                i += 2
-                continue
-
-        # Single-char operators
-        if c == "|":
-            tokens.append(Token(TT.PIPE))
-            i += 1
-            continue
-        if c == ";":
-            tokens.append(Token(TT.SEMI))
-            i += 1
-            continue
-        if c == ">":
-            tokens.append(Token(TT.GT))
-            i += 1
-            continue
-        if c == "<":
-            tokens.append(Token(TT.LT))
-            i += 1
-            continue
-
-        # Word (possibly quoted)
-        word: list[str] = []
-        while i < n and cmd[i] not in " \t\n|&;><#":
-            c = cmd[i]
-            if c == "'":
-                i += 1
-                while i < n and cmd[i] != "'":
-                    word.append(cmd[i])
-                    i += 1
-                if i < n:
-                    i += 1  # closing quote
-            elif c == '"':
-                i += 1
-                seg: list[str] = []
-                while i < n and cmd[i] != '"':
-                    if cmd[i] == "\\" and i + 1 < n and cmd[i + 1] in '"\\$`\n':
-                        i += 1
-                        seg.append(cmd[i])
-                    else:
-                        seg.append(cmd[i])
-                    i += 1
-                if i < n:
-                    i += 1
-                word.append(expand_vars("".join(seg)))
-            elif c == "\\":
-                i += 1
-                if i < n:
-                    word.append(cmd[i])
-                    i += 1
-            else:
-                # Read until whitespace or operator
-                start = i
-                while i < n and cmd[i] not in " \t\n|&;><#'\"\\":
-                    i += 1
-                word.append(expand_vars(cmd[start:i]))
-
-        # Handle && — if we're reading a word and encounter & we need to check
-        # Actually the while condition excludes &, so this case is handled
-        if word:
-            tokens.append(Token(TT.WORD, "".join(word)))
-
-    tokens.append(Token(TT.EOF))
-    return tokens
-
-
-# ---------------------------------------------------------------------------
-# Parser AST
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Redirect:
-    op: str  # ">" | ">>" | "<"
-    path: str
-
-
-@dataclass
-class SimpleCommand:
-    words: list[str] = field(default_factory=list)
-    redirects: list[Redirect] = field(default_factory=list)
-    assignments: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class Pipeline:
-    commands: list[SimpleCommand] = field(default_factory=list)
-
-
-@dataclass
-class CommandList:
-    items: list[tuple[Pipeline, str]] = field(default_factory=list)
-    # Each item is (pipeline, preceding_operator)
-    # First item's operator is "" (none)
-
-
-def parse(tokens: list[Token]) -> CommandList:
-    pos = 0
-
-    def peek() -> Token:
-        return tokens[pos] if pos < len(tokens) else Token(TT.EOF)
-
-    def advance() -> Token:
-        nonlocal pos
-        t = tokens[pos] if pos < len(tokens) else Token(TT.EOF)
-        pos += 1
-        return t
-
-    def parse_simple_command() -> SimpleCommand:
-        cmd = SimpleCommand()
-        while peek().type == TT.WORD:
-            word = advance().value
-            # Variable assignment (only before any non-assignment words)
-            if not cmd.words and "=" in word and not word.startswith("="):
-                key, _, val = word.partition("=")
-                if key.isidentifier():
-                    cmd.assignments[key] = val
-                    continue
-            cmd.words.append(word)
-
-            # Check for redirect after word
-            while peek().type in (TT.GT, TT.GTGT, TT.LT):
-                op_tok = advance()
-                if peek().type != TT.WORD:
-                    break
-                path_tok = advance()
-                op_str = ">" if op_tok.type == TT.GT else (">>" if op_tok.type == TT.GTGT else "<")
-                cmd.redirects.append(Redirect(op=op_str, path=path_tok.value))
-
-        # Trailing redirects without preceding word
-        while peek().type in (TT.GT, TT.GTGT, TT.LT):
-            op_tok = advance()
-            if peek().type != TT.WORD:
-                break
-            path_tok = advance()
-            op_str = ">" if op_tok.type == TT.GT else (">>" if op_tok.type == TT.GTGT else "<")
-            cmd.redirects.append(Redirect(op=op_str, path=path_tok.value))
-
-        return cmd
-
-    def parse_pipeline() -> Pipeline:
-        pipe = Pipeline()
-        pipe.commands.append(parse_simple_command())
-        while peek().type == TT.PIPE:
-            advance()
-            pipe.commands.append(parse_simple_command())
-        return pipe
-
-    def parse_list() -> CommandList:
-        lst = CommandList()
-        lst.items.append((parse_pipeline(), ""))
-        while peek().type in (TT.AND, TT.OR, TT.SEMI):
-            op = advance()
-            op_str = "&&" if op.type == TT.AND else ("||" if op.type == TT.OR else ";")
-            if peek().type in (TT.EOF, TT.SEMI):
-                continue
-            lst.items.append((parse_pipeline(), op_str))
-        return lst
-
-    return parse_list()
-
-
-# ---------------------------------------------------------------------------
-# Shell
-# ---------------------------------------------------------------------------
 
 class Shell:
     def __init__(
@@ -286,8 +67,6 @@ class Shell:
             "uniq": self._cmd_uniq,
             "find": self._cmd_find,
             "sed": self._cmd_sed,
-            "head": self._cmd_head,
-            "tail": self._cmd_tail,
             "tee": self._cmd_tee,
             "basename": self._cmd_basename,
             "dirname": self._cmd_dirname,
@@ -306,19 +85,34 @@ class Shell:
 
     async def exec(self, command: str) -> ExecResult:
         self.env["?"] = str(self._last_exit)
-        tokens = tokenize(command, self.env)
-        cmd_list = parse(tokens)
-        result = await self._exec_list(cmd_list)
+        try:
+            script = parse_command(command)
+        except UnsupportedSyntaxError as e:
+            return ExecResult(stderr=f"parse error: {e}\n", exit_code=2)
+        result = await self._exec_script(script)
         self._last_exit = result.exit_code
         return result
 
-    async def _exec_list(self, lst: CommandList) -> ExecResult:
+    async def _exec_script(self, script: ScriptNode) -> ExecResult:
         result = ExecResult()
-        for pipeline, op in lst.items:
-            if op == "&&" and result.exit_code != 0:
-                continue
-            if op == "||" and result.exit_code == 0:
-                continue
+        for stmt in script.statements:
+            r = await self._exec_statement(stmt)
+            result = ExecResult(
+                stdout=result.stdout + r.stdout,
+                stderr=result.stderr + r.stderr,
+                exit_code=r.exit_code,
+            )
+        return result
+
+    async def _exec_statement(self, stmt: StatementNode) -> ExecResult:
+        result = ExecResult()
+        for i, pipeline in enumerate(stmt.pipelines):
+            if i > 0:
+                op = stmt.operators[i - 1]
+                if op == "&&" and result.exit_code != 0:
+                    continue
+                if op == "||" and result.exit_code == 0:
+                    continue
             r = await self._exec_pipeline(pipeline)
             result = ExecResult(
                 stdout=result.stdout + r.stdout,
@@ -327,14 +121,14 @@ class Shell:
             )
         return result
 
-    async def _exec_pipeline(self, pipeline: Pipeline) -> ExecResult:
+    async def _exec_pipeline(self, pipeline: PipelineNode) -> ExecResult:
         if len(pipeline.commands) == 1:
-            return await self._exec_simple(pipeline.commands[0], stdin="")
+            return await self._exec_command(pipeline.commands[0], stdin="")
 
         stdin = ""
         last_result = ExecResult()
         for i, cmd in enumerate(pipeline.commands):
-            r = await self._exec_simple(cmd, stdin=stdin)
+            r = await self._exec_command(cmd, stdin=stdin)
             stdin = r.stdout
             last_result = ExecResult(
                 stdout=r.stdout if i == len(pipeline.commands) - 1 else "",
@@ -344,15 +138,32 @@ class Shell:
         last_result.stdout = stdin
         return last_result
 
-    async def _exec_simple(self, cmd: SimpleCommand, stdin: str = "") -> ExecResult:
-        # Apply variable assignments
-        for k, v in cmd.assignments.items():
+    async def _exec_command(self, node: object, stdin: str = "") -> ExecResult:
+        if not isinstance(node, SimpleCommandNode):
+            return ExecResult(
+                stderr=f"unsupported: {type(node).__name__} (only simple commands are supported)\n",
+                exit_code=2,
+            )
+
+        assigns = extract_assignments(node.assignments, self.env)
+        for k, v in assigns.items():
             self.env[k] = v
-        if not cmd.words:
+
+        if not node.name:
             return ExecResult()
 
-        name = cmd.words[0]
-        args = cmd.words[1:]
+        try:
+            name = expand_word(node.name, self.env)
+            args = expand_words(node.args, self.env)
+            redirects = extract_redirects(node.redirections, self.env)
+        except UnsupportedSyntaxError as e:
+            return ExecResult(stderr=f"{e}\n", exit_code=2)
+
+        # Feed heredoc content as stdin
+        for redir in redirects:
+            if redir.content:
+                stdin = redir.content
+
         handler = self._builtins.get(name)
         if not handler:
             return ExecResult(stderr=f"{name}: command not found\n", exit_code=127)
@@ -365,23 +176,46 @@ class Shell:
             return ExecResult(stderr=f"{name}: {e}\n", exit_code=1)
 
         # Apply redirects
-        for redir in cmd.redirects:
-            path = self._resolve(redir.path)
+        for redir in redirects:
+            if redir.content:
+                continue
+
+            path = self._resolve(redir.path) if redir.path else None
+
+            if path == "/dev/null":
+                if redir.fd == 1:
+                    result.stdout = ""
+                elif redir.fd == 2:
+                    result.stderr = ""
+                continue
+
             if redir.op == ">":
-                await self.volume.add_doc(path, result.stdout)
-                result.stdout = ""
+                content = result.stdout if redir.fd == 1 else result.stderr
+                if path and content:
+                    await self.volume.add_doc(path, content)
+                if redir.fd == 1:
+                    result.stdout = ""
+                else:
+                    result.stderr = ""
             elif redir.op == ">>":
-                existing = await self.volume.get_doc(path)
-                prev = ""
-                if existing:
-                    prev = existing.content if isinstance(existing.content, str) else existing.content.decode()
-                await self.volume.add_doc(path, prev + result.stdout)
-                result.stdout = ""
-            elif redir.op == "<":
+                content = result.stdout if redir.fd == 1 else result.stderr
+                if path:
+                    existing = await self.volume.get_doc(path)
+                    prev = ""
+                    if existing:
+                        prev = existing.content if isinstance(existing.content, str) else existing.content.decode()
+                    if prev or content:
+                        await self.volume.add_doc(path, prev + content)
+                if redir.fd == 1:
+                    result.stdout = ""
+                else:
+                    result.stderr = ""
+            elif redir.op == "<" and path:
                 doc = await self.volume.get_doc(path)
                 if not doc:
                     return ExecResult(stderr=f"{name}: {path}: No such file\n", exit_code=1)
-                stdin = doc.content if isinstance(doc.content, str) else doc.content.decode()
+                # stdin redirect — re-run would be needed, but for compatibility
+                # just store it (existing behavior)
 
         return result
 
@@ -410,7 +244,6 @@ class Shell:
             return ExecResult()
         fmt = args[0]
         out = fmt.replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
-        # Very basic %s substitution
         for a in args[1:]:
             out = out.replace("%s", a, 1)
         return ExecResult(stdout=out)
@@ -420,7 +253,6 @@ class Shell:
         paths = [a for a in args if not a.startswith("-")]
 
         if not paths:
-            # Read from stdin
             if numbered:
                 lines = stdin.split("\n")
                 out = "\n".join(f"     {i+1}\t{l}" for i, l in enumerate(lines) if l or i < len(lines) - 1)
@@ -521,7 +353,6 @@ class Shell:
 
             is_dir = self.volume.path_index.is_directory(path)
             if not summaries and not is_dir:
-                # Maybe it's a file
                 stat = await self.volume.stat_doc(path)
                 if stat and stat.is_file:
                     out_parts.append(p.rsplit("/", 1)[-1])
@@ -597,7 +428,7 @@ class Shell:
                 result = await self.volume.remove_by_prefix(prefix)
                 self.volume.path_index.remove_synthetic_dir(path)
                 if result.errors and not force:
-                    return ExecResult(stderr=f"rm: failed to remove some files\n", exit_code=1)
+                    return ExecResult(stderr="rm: failed to remove some files\n", exit_code=1)
             else:
                 doc_id = self.volume.path_index.resolve(path)
                 if not doc_id:
@@ -671,7 +502,7 @@ class Shell:
             path = self._resolve(p)
             existing = await self.volume.get_doc(path)
             if not existing:
-                await self.volume.add_doc(path, "")
+                await self.volume.add_doc(path, " ")
         return ExecResult()
 
     async def _cmd_stat(self, args: list[str], stdin: str) -> ExecResult:
@@ -701,14 +532,12 @@ class Shell:
         return ExecResult()
 
     async def _cmd_test(self, args: list[str], stdin: str) -> ExecResult:
-        # Strip trailing ] for [ command
         if args and args[-1] == "]":
             args = args[:-1]
         if not args:
             return ExecResult(exit_code=1)
 
         if len(args) == 1:
-            # [ STRING ] — true if non-empty
             return ExecResult(exit_code=0 if args[0] else 1)
 
         op = args[0]
@@ -731,7 +560,6 @@ class Shell:
             inner = await self._cmd_test(args[1:], stdin)
             return ExecResult(exit_code=0 if inner.exit_code != 0 else 1)
 
-        # Binary operators: str1 OP str2
         if len(args) >= 3:
             lhs, op, rhs = args[0], args[1], args[2]
             if op == "=":
@@ -789,7 +617,6 @@ class Shell:
             return matches, count
 
         if not targets:
-            # Grep from stdin
             matches, count = await grep_content(stdin, None)
             if count_only:
                 return ExecResult(stdout=f"{count}\n", exit_code=0 if count else 1)
@@ -1010,7 +837,6 @@ class Shell:
         results: list[str] = [base_path]
         seen_dirs: set[str] = set()
         for s in summaries:
-            # Add intermediate dirs
             rest = s.filepath[len(prefix):]
             parts = rest.split("/")
             cur = base_path
@@ -1022,7 +848,6 @@ class Shell:
                         name = cur.rsplit("/", 1)[-1]
                         if name_pattern is None or fnmatch.fnmatch(name, name_pattern):
                             results.append(cur)
-            # Add the file itself
             if type_filter != "d":
                 name = s.filepath.rsplit("/", 1)[-1]
                 if name_pattern is None or fnmatch.fnmatch(name, name_pattern):
@@ -1031,7 +856,6 @@ class Shell:
         return ExecResult(stdout="\n".join(results) + "\n")
 
     async def _cmd_sed(self, args: list[str], stdin: str) -> ExecResult:
-        # Only supports: sed 's/pattern/replacement/[g]' [file]
         in_place = "-i" in args
         positional = [a for a in args if a != "-i"]
         if not positional:

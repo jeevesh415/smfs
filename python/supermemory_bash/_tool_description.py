@@ -13,5 +13,5 @@ Workflow: use `sgrep` to find which files are relevant, then `cat` or `grep` on 
 
 Eventual consistency: writes return immediately and self-reads see them via the local cache. Other sessions and `sgrep` see new content after the server finishes ingesting (typically 5–30 seconds for indexing; semantic memory extraction may take longer). If `sgrep` returns no hits for content you just wrote, wait a few seconds and retry.
 
-What's not supported: chmod, utimes, symlinks, /dev/null redirects (real device files don't exist here), and large binary uploads. These will throw clear errors.
+What's not supported: chmod, utimes, symlinks, and large binary uploads. These will throw clear errors.
 """

@@ -1,11 +1,10 @@
 """Unit tests for the shell interpreter, using a mock volume."""
 from __future__ import annotations
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock
-from supermemory_bash._shell import Shell, tokenize, parse, ExecResult, TT, _normalize_path
-from supermemory_bash._volume import SupermemoryVolume, DocResult, DocSummary, DocStat, SearchResp, SearchResult
+from unittest.mock import MagicMock
+from supermemory_bash._shell import Shell, ExecResult, _normalize_path
+from supermemory_bash._volume import DocResult, DocSummary, DocStat, SearchResp, SearchResult
 from supermemory_bash._path_index import PathIndex
 from supermemory_bash._session_cache import SessionCache
 
@@ -120,44 +119,6 @@ def make_shell() -> tuple[Shell, FakeVolume]:
     vol = FakeVolume()
     shell = Shell(vol, cwd="/home/user")  # type: ignore[arg-type]
     return shell, vol
-
-
-# --- Tokenizer tests ---
-
-def test_tokenize_simple():
-    tokens = tokenize("echo hello world")
-    words = [t.value for t in tokens if t.type == TT.WORD]
-    assert words == ["echo", "hello", "world"]
-
-
-def test_tokenize_quotes():
-    tokens = tokenize("echo 'hello world' \"foo bar\"")
-    words = [t.value for t in tokens if t.type == TT.WORD]
-    assert words == ["echo", "hello world", "foo bar"]
-
-
-def test_tokenize_pipe():
-    tokens = tokenize("cat file | head -n 5")
-    types = [t.type for t in tokens if t.type != TT.EOF]
-    assert TT.PIPE in types
-
-
-def test_tokenize_redirect():
-    tokens = tokenize("echo hi > /out.txt")
-    types = [t.type for t in tokens if t.type != TT.EOF]
-    assert TT.GT in types
-
-
-def test_tokenize_and():
-    tokens = tokenize("cmd1 && cmd2")
-    types = [t.type for t in tokens if t.type != TT.EOF]
-    assert TT.AND in types
-
-
-def test_tokenize_var_expansion():
-    tokens = tokenize("echo $FOO", {"FOO": "bar"})
-    words = [t.value for t in tokens if t.type == TT.WORD]
-    assert words == ["echo", "bar"]
 
 
 # --- Path normalization ---
@@ -459,3 +420,65 @@ async def test_ls(shell_and_vol):
     r = await shell.exec("ls /mydir")
     assert "a.txt" in r.stdout
     assert "b.txt" in r.stdout
+
+
+# --- Regression tests: fd redirects, /dev/null, heredocs ---
+
+@pytest.mark.asyncio
+async def test_stderr_redirect_to_dev_null(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("ls /nonexistent 2>/dev/null")
+    assert r.stderr == ""
+    assert r.exit_code != 0
+
+
+@pytest.mark.asyncio
+async def test_stdout_redirect_to_dev_null(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/test.txt", "content")
+    r = await shell.exec("cat /test.txt > /dev/null")
+    assert r.stdout == ""
+
+
+@pytest.mark.asyncio
+async def test_fd_redirect_not_passed_as_arg(shell_and_vol):
+    """2>/dev/null should not include '2' in the command output."""
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo hello 2>/dev/null")
+    assert r.stdout.strip() == "hello"
+    assert "2" not in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_combined_redirects(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo hello > /out.txt 2>/dev/null")
+    doc = await vol.get_doc("/out.txt")
+    assert doc is not None
+    assert "hello" in doc.content
+
+
+@pytest.mark.asyncio
+async def test_heredoc(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("cat <<EOF\nhello world\nEOF")
+    assert "hello world" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_ls_with_stderr_suppressed(shell_and_vol):
+    """The original bug: ls /path 2>/dev/null | head -50"""
+    shell, vol = shell_and_vol
+    await vol.add_doc("/mydir/file.txt", "content")
+    r = await shell.exec("ls /mydir 2>/dev/null | head -50")
+    assert "file.txt" in r.stdout
+    assert r.stderr == ""
+
+
+@pytest.mark.asyncio
+async def test_dev_null_no_api_write(shell_and_vol):
+    """Redirecting to /dev/null should NOT create a file."""
+    shell, vol = shell_and_vol
+    await shell.exec("echo test > /dev/null")
+    doc = await vol.get_doc("/dev/null")
+    assert doc is None
