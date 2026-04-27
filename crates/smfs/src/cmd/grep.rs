@@ -219,9 +219,8 @@ pub async fn run(args: Args) -> Result<()> {
                     let end = start + chunk.matches('\n').count();
                     return Some((start, end));
                 }
-                let norm = |s: &str| -> String {
-                    s.split_whitespace().collect::<Vec<_>>().join(" ")
-                };
+                let norm =
+                    |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
                 let normed_file = norm(&file_content);
                 let normed_chunk = norm(chunk);
                 let norm_pos = normed_file.find(&normed_chunk)?;
