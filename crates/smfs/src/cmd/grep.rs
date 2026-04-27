@@ -177,18 +177,86 @@ pub async fn run(args: Args) -> Result<()> {
             println!();
         }
         let fp = result.filepath.as_deref().unwrap_or("(unknown)");
-        let content = result
+        let display = result
             .memory
             .as_deref()
             .or(result.chunk.as_deref())
             .unwrap_or("");
 
-        let escaped = content
+        let escaped = display
             .replace('\\', "\\\\")
             .replace('\n', "\\n")
             .replace('\r', "\\r");
 
-        println!("{}:{}", fp, escaped);
+        // Resolve line range by matching chunk text against the local file.
+        // For binary types (pdf, image, …) try the transcription sidecar.
+        let line_range = canonical_mount
+            .as_ref()
+            .zip(result.filepath.as_deref())
+            .and_then(|(cm, path)| {
+                let chunk = result.chunk.as_deref()?;
+                let stripped = path.trim_start_matches('/');
+                let local = cm.join(stripped);
+                let file_content = std::fs::read_to_string(&local)
+                    .or_else(|_| {
+                        for suffix in &[
+                            ".pdf-transcription.md",
+                            ".image-transcription.md",
+                            ".video-transcription.md",
+                            ".audio-transcription.md",
+                            ".webpage-transcription.md",
+                        ] {
+                            let sidecar = cm.join(format!("{stripped}{suffix}"));
+                            if let Ok(c) = std::fs::read_to_string(&sidecar) {
+                                return Ok(c);
+                            }
+                        }
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
+                    })
+                    .ok()?;
+                if let Some(pos) = file_content.find(chunk) {
+                    let start = file_content[..pos].matches('\n').count() + 1;
+                    let end = start + chunk.matches('\n').count();
+                    return Some((start, end));
+                }
+                let norm = |s: &str| -> String {
+                    s.split_whitespace().collect::<Vec<_>>().join(" ")
+                };
+                let normed_file = norm(&file_content);
+                let normed_chunk = norm(chunk);
+                let norm_pos = normed_file.find(&normed_chunk)?;
+                let mut orig_start = 0;
+                let mut norm_consumed = 0;
+                let mut in_ws = false;
+                for (i, ch) in file_content.char_indices() {
+                    if norm_consumed >= norm_pos {
+                        orig_start = i;
+                        break;
+                    }
+                    if ch.is_whitespace() {
+                        if !in_ws {
+                            norm_consumed += 1;
+                            in_ws = true;
+                        }
+                    } else {
+                        norm_consumed += 1;
+                        in_ws = false;
+                    }
+                }
+                let start = file_content[..orig_start].matches('\n').count() + 1;
+                let end = start + chunk.matches('\n').count();
+                Some((start, end))
+            });
+
+        if let Some((start, end)) = line_range {
+            if start == end {
+                println!("{}:{}:{}", fp, start, escaped);
+            } else {
+                println!("{}:{}-{}:{}", fp, start, end, escaped);
+            }
+        } else {
+            println!("{}:{}", fp, escaped);
+        }
     }
 
     Ok(())
