@@ -1,0 +1,461 @@
+"""Unit tests for the shell interpreter, using a mock volume."""
+from __future__ import annotations
+
+import asyncio
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from supermemory_bash._shell import Shell, tokenize, parse, ExecResult, TT, _normalize_path
+from supermemory_bash._volume import SupermemoryVolume, DocResult, DocSummary, DocStat, SearchResp, SearchResult
+from supermemory_bash._path_index import PathIndex
+from supermemory_bash._session_cache import SessionCache
+
+
+class FakeVolume:
+    """In-memory volume for testing the shell without HTTP."""
+
+    def __init__(self) -> None:
+        self.path_index = PathIndex()
+        self.cache = SessionCache(ttl_ms=None)
+        self._files: dict[str, str] = {}
+        for d in ["/home", "/home/user", "/tmp", "/dev"]:
+            self.path_index.mark_synthetic_dir(d)
+
+    def mark_synthetic_dir(self, path: str) -> None:
+        self.path_index.mark_synthetic_dir(path)
+
+    async def add_doc(self, path: str, content: str | bytes) -> tuple[str, str]:
+        if isinstance(content, bytes):
+            content = content.decode()
+        self._files[path] = content
+        doc_id = f"doc-{hash(path) % 10000}"
+        self.path_index.insert(path, doc_id)
+        self.cache.set(path, content, "done")
+        return doc_id, "done"
+
+    async def get_doc(self, path: str) -> DocResult | None:
+        if path not in self._files:
+            return None
+        return DocResult(
+            id=f"doc-{hash(path) % 10000}",
+            content=self._files[path],
+            status="done",
+        )
+
+    async def remove_doc(self, path: str) -> None:
+        self._files.pop(path, None)
+        self.path_index.remove(path)
+        self.cache.delete(path)
+
+    async def remove_by_prefix(self, prefix: str) -> MagicMock:
+        to_remove = [p for p in self._files if p.startswith(prefix)]
+        for p in to_remove:
+            del self._files[p]
+            self.path_index.remove(p)
+            self.cache.delete(p)
+        result = MagicMock()
+        result.deleted = len(to_remove)
+        result.errors = []
+        return result
+
+    async def move_doc(self, from_path: str, to_path: str) -> None:
+        content = self._files.pop(from_path, "")
+        self._files[to_path] = content
+        doc_id = self.path_index.resolve(from_path)
+        self.path_index.remove(from_path)
+        self.path_index.insert(to_path, doc_id or "moved")
+        self.cache.delete(from_path)
+        self.cache.set(to_path, content, "done")
+
+    async def stat_doc(self, path: str) -> DocStat | None:
+        if self.path_index.is_directory(path) and not self.path_index.is_file(path):
+            return DocStat(is_file=False, is_directory=True, size=0, mtime=0.0)
+        if path in self._files:
+            return DocStat(
+                is_file=True, is_directory=False,
+                size=len(self._files[path]), mtime=0.0,
+                id=f"doc-{hash(path) % 10000}", status="done",
+            )
+        return None
+
+    async def list_by_prefix(
+        self, prefix: str, *, with_content: bool = False, exact: bool = False, limit: int | None = None,
+    ) -> list[DocSummary]:
+        out = []
+        for p, content in sorted(self._files.items()):
+            if exact:
+                if p != prefix:
+                    continue
+            else:
+                if not p.startswith(prefix):
+                    continue
+            out.append(DocSummary(
+                id=f"doc-{hash(p) % 10000}",
+                filepath=p,
+                status="done",
+                size=len(content),
+                mtime=0.0,
+                content=content if with_content else None,
+            ))
+            if limit and len(out) >= limit:
+                break
+        return out
+
+    async def search(self, q: str, filepath: str | None = None) -> SearchResp:
+        results = []
+        for p, content in self._files.items():
+            if filepath and not p.startswith(filepath):
+                continue
+            if q.lower() in content.lower():
+                results.append(SearchResult(id="r1", filepath=p, memory=content, similarity=0.9))
+        return SearchResp(results=results)
+
+    def cached_all_paths(self) -> list[str]:
+        return sorted(self._files.keys())
+
+    def synthetic_dir_paths(self) -> list[str]:
+        return self.path_index.synthetic_dir_paths()
+
+
+def make_shell() -> tuple[Shell, FakeVolume]:
+    vol = FakeVolume()
+    shell = Shell(vol, cwd="/home/user")  # type: ignore[arg-type]
+    return shell, vol
+
+
+# --- Tokenizer tests ---
+
+def test_tokenize_simple():
+    tokens = tokenize("echo hello world")
+    words = [t.value for t in tokens if t.type == TT.WORD]
+    assert words == ["echo", "hello", "world"]
+
+
+def test_tokenize_quotes():
+    tokens = tokenize("echo 'hello world' \"foo bar\"")
+    words = [t.value for t in tokens if t.type == TT.WORD]
+    assert words == ["echo", "hello world", "foo bar"]
+
+
+def test_tokenize_pipe():
+    tokens = tokenize("cat file | head -n 5")
+    types = [t.type for t in tokens if t.type != TT.EOF]
+    assert TT.PIPE in types
+
+
+def test_tokenize_redirect():
+    tokens = tokenize("echo hi > /out.txt")
+    types = [t.type for t in tokens if t.type != TT.EOF]
+    assert TT.GT in types
+
+
+def test_tokenize_and():
+    tokens = tokenize("cmd1 && cmd2")
+    types = [t.type for t in tokens if t.type != TT.EOF]
+    assert TT.AND in types
+
+
+def test_tokenize_var_expansion():
+    tokens = tokenize("echo $FOO", {"FOO": "bar"})
+    words = [t.value for t in tokens if t.type == TT.WORD]
+    assert words == ["echo", "bar"]
+
+
+# --- Path normalization ---
+
+def test_normalize_path():
+    assert _normalize_path("/a/b/../c") == "/a/c"
+    assert _normalize_path("/a/./b") == "/a/b"
+    assert _normalize_path("///a//b") == "/a/b"
+    assert _normalize_path("/") == "/"
+
+
+# --- Shell command tests ---
+
+@pytest.fixture
+def shell_and_vol():
+    return make_shell()
+
+
+@pytest.mark.asyncio
+async def test_echo(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo hello world")
+    assert r.stdout == "hello world\n"
+    assert r.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_echo_n(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo -n hello")
+    assert r.stdout == "hello"
+
+
+@pytest.mark.asyncio
+async def test_write_and_cat(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo 'hello world' > /a.md")
+    assert r.exit_code == 0
+    r = await shell.exec("cat /a.md")
+    assert r.stdout == "hello world\n"
+
+
+@pytest.mark.asyncio
+async def test_append_redirect(shell_and_vol):
+    shell, vol = shell_and_vol
+    await shell.exec("echo line1 > /b.txt")
+    await shell.exec("echo line2 >> /b.txt")
+    r = await shell.exec("cat /b.txt")
+    assert "line1" in r.stdout
+    assert "line2" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_pipe(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/test.txt", "line1\nline2\nline3\nline4\nline5\n")
+    r = await shell.exec("cat /test.txt | head -n 2")
+    lines = r.stdout.strip().split("\n")
+    assert len(lines) == 2
+    assert lines[0] == "line1"
+
+
+@pytest.mark.asyncio
+async def test_and_chain_success(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo first && echo second")
+    assert "first" in r.stdout
+    assert "second" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_and_chain_failure(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("cat /nonexistent && echo should_not_appear")
+    assert "should_not_appear" not in r.stdout
+    assert r.exit_code != 0
+
+
+@pytest.mark.asyncio
+async def test_or_chain(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("cat /nonexistent || echo fallback")
+    assert "fallback" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_pwd(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("pwd")
+    assert r.stdout.strip() == "/home/user"
+
+
+@pytest.mark.asyncio
+async def test_cd_and_pwd(shell_and_vol):
+    shell, vol = shell_and_vol
+    vol.mark_synthetic_dir("/notes")
+    await shell.exec("cd /notes")
+    r = await shell.exec("pwd")
+    assert r.stdout.strip() == "/notes"
+
+
+@pytest.mark.asyncio
+async def test_mkdir(shell_and_vol):
+    shell, vol = shell_and_vol
+    await shell.exec("mkdir /mydir")
+    r = await shell.exec("test -d /mydir")
+    assert r.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_mkdir_p(shell_and_vol):
+    shell, vol = shell_and_vol
+    await shell.exec("mkdir -p /a/b/c")
+    r = await shell.exec("test -d /a/b/c")
+    assert r.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_rm_file(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/to_delete.txt", "content")
+    r = await shell.exec("rm /to_delete.txt")
+    assert r.exit_code == 0
+    r = await shell.exec("cat /to_delete.txt")
+    assert r.exit_code != 0
+
+
+@pytest.mark.asyncio
+async def test_mv(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/old.txt", "content")
+    await shell.exec("mv /old.txt /new.txt")
+    r = await shell.exec("cat /new.txt")
+    assert r.stdout == "content"
+    r = await shell.exec("cat /old.txt")
+    assert r.exit_code != 0
+
+
+@pytest.mark.asyncio
+async def test_cp(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/src.txt", "original")
+    await shell.exec("cp /src.txt /dst.txt")
+    r = await shell.exec("cat /dst.txt")
+    assert r.stdout == "original"
+    r = await shell.exec("cat /src.txt")
+    assert r.stdout == "original"
+
+
+@pytest.mark.asyncio
+async def test_head(shell_and_vol):
+    shell, vol = shell_and_vol
+    content = "\n".join(f"line{i}" for i in range(20))
+    await vol.add_doc("/many.txt", content)
+    r = await shell.exec("head -n 3 /many.txt")
+    lines = r.stdout.strip().split("\n")
+    assert len(lines) == 3
+
+
+@pytest.mark.asyncio
+async def test_tail(shell_and_vol):
+    shell, vol = shell_and_vol
+    content = "\n".join(f"line{i}" for i in range(20))
+    await vol.add_doc("/many.txt", content)
+    r = await shell.exec("tail -n 3 /many.txt")
+    lines = r.stdout.strip().split("\n")
+    assert len(lines) == 3
+    assert "line19" in lines[-1]
+
+
+@pytest.mark.asyncio
+async def test_grep(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/data.txt", "apple\nbanana\napricot\ncherry\n")
+    r = await shell.exec("grep ap /data.txt")
+    assert "apple" in r.stdout
+    assert "apricot" in r.stdout
+    assert "cherry" not in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_grep_case_insensitive(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/data.txt", "Apple\nBANANA\n")
+    r = await shell.exec("grep -i apple /data.txt")
+    assert "Apple" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_wc(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/wc.txt", "one two three\nfour five\n")
+    r = await shell.exec("wc -l /wc.txt")
+    assert "2" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_sort(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo -e 'c\na\nb' | sort")
+    lines = r.stdout.strip().split("\n")
+    assert lines == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_test_file(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/exists.txt", "hi")
+    r = await shell.exec("test -f /exists.txt")
+    assert r.exit_code == 0
+    r = await shell.exec("test -f /nope.txt")
+    assert r.exit_code != 0
+
+
+@pytest.mark.asyncio
+async def test_test_dir(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("test -d /home")
+    assert r.exit_code == 0
+    r = await shell.exec("test -d /nonexistent")
+    assert r.exit_code != 0
+
+
+@pytest.mark.asyncio
+async def test_basename(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("basename /home/user/file.txt")
+    assert r.stdout.strip() == "file.txt"
+
+
+@pytest.mark.asyncio
+async def test_dirname(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("dirname /home/user/file.txt")
+    assert r.stdout.strip() == "/home/user"
+
+
+@pytest.mark.asyncio
+async def test_seq(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("seq 5")
+    assert r.stdout.strip() == "1\n2\n3\n4\n5"
+
+
+@pytest.mark.asyncio
+async def test_variable_assignment(shell_and_vol):
+    shell, vol = shell_and_vol
+    await shell.exec("FOO=hello")
+    r = await shell.exec("echo $FOO")
+    assert r.stdout.strip() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_touch(shell_and_vol):
+    shell, vol = shell_and_vol
+    await shell.exec("touch /newfile.txt")
+    r = await shell.exec("test -f /newfile.txt")
+    assert r.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_command_not_found(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("nonexistent_cmd")
+    assert r.exit_code == 127
+    assert "command not found" in r.stderr
+
+
+@pytest.mark.asyncio
+async def test_sgrep(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/notes/auth.md", "authentication tokens and OAuth flow")
+    r = await shell.exec("sgrep 'authentication tokens'")
+    assert r.exit_code == 0
+    assert "auth.md" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_sed_substitute(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo 'hello world' | sed 's/world/earth/'")
+    assert "earth" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_tee(shell_and_vol):
+    shell, vol = shell_and_vol
+    r = await shell.exec("echo 'hello' | tee /tee_out.txt")
+    assert "hello" in r.stdout
+    r2 = await shell.exec("cat /tee_out.txt")
+    assert "hello" in r2.stdout
+
+
+@pytest.mark.asyncio
+async def test_ls(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/mydir/a.txt", "a")
+    await vol.add_doc("/mydir/b.txt", "b")
+    r = await shell.exec("ls /mydir")
+    assert "a.txt" in r.stdout
+    assert "b.txt" in r.stdout
