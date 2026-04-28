@@ -299,6 +299,8 @@ class SupermemoryVolume:
 
         deleted = 0
         errors: list[Exception] = []
+        failed_ids: set[str] = set()
+        any_unattributed = False
         try:
             resp = await self.client.documents_delete_bulk({
                 "containerTags": [self.container_tag],
@@ -307,14 +309,21 @@ class SupermemoryVolume:
             deleted = resp.get("deletedCount", 0)
             for e in resp.get("errors", []):
                 errors.append(Exception(f"{e.get('id')}: {e.get('error')}"))
+                if e.get("id"):
+                    failed_ids.add(e["id"])
+                else:
+                    any_unattributed = True
         except Exception as err:
             errors.append(Exception(f"remove_by_prefix({prefix}): {err}"))
             return RemoveByPrefixResult(deleted=deleted, errors=errors)
 
-        for p in list(self.path_index.paths()):
-            if p.startswith(prefix):
-                self.path_index.remove(p)
-                self.cache.delete(p)
+        if not any_unattributed:
+            for p in list(self.path_index.paths()):
+                if p.startswith(prefix):
+                    doc_id = self.path_index.resolve(p)
+                    if doc_id not in failed_ids:
+                        self.path_index.remove(p)
+                        self.cache.delete(p)
 
         return RemoveByPrefixResult(deleted=deleted, errors=errors)
 

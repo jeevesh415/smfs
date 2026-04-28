@@ -96,3 +96,19 @@ async def test_stat_doc_returns_synthetic_stat_for_profile() -> None:
     assert stat.is_directory is False
     assert stat.size > 0
     assert stat.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_remove_by_prefix_keeps_paths_when_server_reports_per_doc_errors() -> None:
+    client = MagicMock()
+    client.documents_delete_bulk = AsyncMock(return_value={
+        "deletedCount": 1,
+        "errors": [{"id": "doc-failed", "error": "still in use"}],
+    })
+    v = _make_volume(client)
+    v.path_index.insert("/keep.md", "doc-failed")
+    v.path_index.insert("/gone.md", "doc-ok")
+    result = await v.remove_by_prefix("/")
+    assert v.path_index.is_file("/keep.md"), v.path_index.paths()
+    assert not v.path_index.is_file("/gone.md"), v.path_index.paths()
+    assert len(result.errors) == 1

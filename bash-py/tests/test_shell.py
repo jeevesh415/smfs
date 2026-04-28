@@ -520,3 +520,46 @@ async def test_fs_error_einval_caught_and_returned_as_exit_1():
     r = await shell.exec("echo hi > /noext")
     assert r.exit_code == 1, r
     assert "EINVAL" in r.stderr, r.stderr
+
+
+@pytest.mark.asyncio
+async def test_input_redirect_feeds_stdin_to_command(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/in.txt", "alpha\nbeta\ngamma\n")
+    r = await shell.exec("wc -l < /in.txt")
+    assert r.exit_code == 0, r
+    assert r.stdout.strip() == "3", r.stdout
+
+
+@pytest.mark.asyncio
+async def test_mv_into_existing_directory_uses_basename(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/dst/keep.md", "anchor")
+    await vol.add_doc("/a.txt", "hello")
+    r = await shell.exec("mv /a.txt /dst/")
+    assert r.exit_code == 0, r
+    assert vol.path_index.is_file("/dst/a.txt"), vol.path_index.paths()
+    assert vol.path_index.is_file("/dst/keep.md"), vol.path_index.paths()
+    assert not vol.path_index.is_file("/dst")
+
+
+@pytest.mark.asyncio
+async def test_cp_into_existing_directory_uses_basename(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/dst/keep.md", "anchor")
+    await vol.add_doc("/a.txt", "hello")
+    r = await shell.exec("cp /a.txt /dst/")
+    assert r.exit_code == 0, r
+    assert vol.path_index.is_file("/dst/a.txt"), vol.path_index.paths()
+    assert vol.path_index.is_file("/a.txt"), vol.path_index.paths()
+    assert vol.path_index.is_file("/dst/keep.md"), vol.path_index.paths()
+    assert not vol.path_index.is_file("/dst")
+
+
+@pytest.mark.asyncio
+async def test_grep_c_counts_each_match_once(shell_and_vol):
+    shell, vol = shell_and_vol
+    await vol.add_doc("/file.txt", "apple\napple\nbanana\n")
+    r = await shell.exec("grep -c apple /file.txt")
+    assert r.exit_code == 0, r
+    assert r.stdout.strip() == "2", r.stdout

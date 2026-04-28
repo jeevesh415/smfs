@@ -83,6 +83,14 @@ class Shell:
             return _normalize_path(path)
         return _normalize_path(f"{self.cwd}/{path}")
 
+    def _resolve_dest_into_dir(self, src: str, dest: str) -> str:
+        if (self.volume.path_index.is_directory(dest)
+                and not self.volume.path_index.is_file(dest)):
+            base = src.rstrip("/").rsplit("/", 1)[-1]
+            if base:
+                return (dest if dest.endswith("/") else dest + "/") + base
+        return dest
+
     async def exec(self, command: str) -> ExecResult:
         self.env["?"] = str(self._last_exit)
         try:
@@ -162,10 +170,15 @@ class Shell:
         except UnsupportedSyntaxError as e:
             return ExecResult(stderr=f"{e}\n", exit_code=2)
 
-        # Feed heredoc content as stdin
         for redir in redirects:
             if redir.content:
                 stdin = redir.content
+            elif redir.op == "<" and redir.path:
+                path = self._resolve(redir.path)
+                doc = await self.volume.get_doc(path)
+                if not doc:
+                    return ExecResult(stderr=f"{name}: {path}: No such file\n", exit_code=1)
+                stdin = doc.content if isinstance(doc.content, str) else doc.content.decode()
 
         handler = self._builtins.get(name)
         if not handler:
@@ -178,9 +191,8 @@ class Shell:
         except Exception as e:
             return ExecResult(stderr=f"{name}: {e}\n", exit_code=1)
 
-        # Apply redirects
         for redir in redirects:
-            if redir.content:
+            if redir.content or redir.op == "<":
                 continue
 
             path = self._resolve(redir.path) if redir.path else None
@@ -213,12 +225,6 @@ class Shell:
                     result.stdout = ""
                 else:
                     result.stderr = ""
-            elif redir.op == "<" and path:
-                doc = await self.volume.get_doc(path)
-                if not doc:
-                    return ExecResult(stderr=f"{name}: {path}: No such file\n", exit_code=1)
-                # stdin redirect — re-run would be needed, but for compatibility
-                # just store it (existing behavior)
 
         return result
 
@@ -461,6 +467,7 @@ class Shell:
         if len(paths) < 2:
             return ExecResult(stderr="mv: missing operand\n", exit_code=1)
         src, dest = self._resolve(paths[0]), self._resolve(paths[1])
+        dest = self._resolve_dest_into_dir(src, dest)
 
         is_dir = self.volume.path_index.is_directory(src) and not self.volume.path_index.is_file(src)
         if is_dir:
@@ -481,6 +488,7 @@ class Shell:
         if len(paths) < 2:
             return ExecResult(stderr="cp: missing operand\n", exit_code=1)
         src, dest = self._resolve(paths[0]), self._resolve(paths[1])
+        dest = self._resolve_dest_into_dir(src, dest)
 
         is_dir = self.volume.path_index.is_directory(src) and not self.volume.path_index.is_file(src)
         if is_dir:
@@ -648,7 +656,6 @@ class Shell:
                         total_count += c
                     else:
                         all_matches.extend(ms)
-                    total_count += c
             else:
                 doc = await self.volume.get_doc(path)
                 if not doc:
@@ -662,7 +669,6 @@ class Shell:
                     total_count += c
                 else:
                     all_matches.extend(ms)
-                total_count += c
 
         if count_only:
             return ExecResult(stdout=f"{total_count}\n", exit_code=0 if total_count else 1)
