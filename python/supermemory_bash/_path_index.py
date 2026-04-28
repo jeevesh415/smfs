@@ -44,6 +44,20 @@ class PathIndex:
         prefix = path if path.endswith("/") else f"{path}/"
         return any(f.startswith(prefix) for f in self._files)
 
+    def find_ancestor_file(self, path: str) -> str | None:
+        segments = [s for s in path.split("/") if s != ""]
+        for i in range(len(segments) - 1, 0, -1):
+            ancestor = "/" + "/".join(segments[:i])
+            if ancestor in self._files:
+                return ancestor
+        return None
+
+    def has_descendant(self, path: str) -> bool:
+        if path in ("", "/"):
+            return False
+        prefix = path if path.endswith("/") else f"{path}/"
+        return any(f.startswith(prefix) for f in self._files)
+
     def paths(self) -> list[str]:
         return sorted(self._files)
 
