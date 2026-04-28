@@ -9,6 +9,7 @@ from ._client import SupermemoryClient
 from ._errors import ebusy, eexist, efbig, eio, enoent
 from ._path_index import PathIndex
 from ._session_cache import CachedEntry, DocStatus, SessionCache
+from ._validation import ValidationCtx, assert_writable
 
 
 def _normalize_status(s: str) -> DocStatus:
@@ -145,6 +146,7 @@ class SupermemoryVolume:
     async def add_doc(self, path: str, content: str | bytes) -> tuple[str, DocStatus]:
         if isinstance(content, (bytes, bytearray)):
             raise efbig(path)
+        assert_writable(ValidationCtx(path=path, intent="addDoc", path_index=self.path_index))
 
         existing = self.path_index.resolve(path)
         try:
@@ -305,6 +307,7 @@ class SupermemoryVolume:
         return RemoveByPrefixResult(deleted=deleted, errors=errors)
 
     async def move_doc(self, from_path: str, to_path: str) -> None:
+        assert_writable(ValidationCtx(path=to_path, intent="moveDoc", path_index=self.path_index))
         doc_id = await self._lookup_doc_id(from_path)
         if not doc_id:
             raise enoent(from_path)
