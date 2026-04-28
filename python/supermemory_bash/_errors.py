@@ -54,3 +54,7 @@ def efbig(path: str) -> FsError:
 
 def ebusy(path: str) -> FsError:
     return _make("EBUSY", -16, f"resource busy or locked, '{path}'")
+
+
+def enametoolong(path: str) -> FsError:
+    return _make("ENAMETOOLONG", -36, f"file name too long, '{path}'")

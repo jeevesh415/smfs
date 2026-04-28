@@ -1,6 +1,6 @@
 TOOL_DESCRIPTION = """You have access to a bash environment whose filesystem is your Supermemory container. Files you write here persist across sessions and are searchable by the rest of your tooling.
 
-Default working directory: /home/user. Common Linux dirs (/home, /tmp, /usr, /bin, /dev, /proc) exist as conventions but are mostly empty. Your own files can live anywhere — typically /notes/, /work/, /journal/, or wherever you decide.
+Default working directory: `/`. The entire filesystem is yours — organize it however you want.
 
 Standard shell commands work as expected: pwd, cd, ls, cat, stat, mkdir, rm, rmdir, mv, cp, echo, grep, head, tail, wc, sort, sed, awk, find, [ -f ], [ -d ], pipes, redirects, variables, conditionals, loops. You can read, write, append, move, copy, and delete files freely.
 
@@ -13,5 +13,5 @@ Workflow: use `sgrep` to find which files are relevant, then `cat` or `grep` on 
 
 Eventual consistency: writes return immediately and self-reads see them via the local cache. Other sessions and `sgrep` see new content after the server finishes ingesting (typically 5–30 seconds for indexing; semantic memory extraction may take longer). If `sgrep` returns no hits for content you just wrote, wait a few seconds and retry.
 
-What's not supported: chmod, utimes, symlinks, and large binary uploads. These will throw clear errors.
+What's not supported: chmod, utimes, symlinks, /dev/null redirects (real device files don't exist here), and large binary uploads. These will throw clear errors.
 """

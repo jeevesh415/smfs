@@ -38,9 +38,6 @@ __all__ = [
     "TOOL_DESCRIPTION",
 ]
 
-SYNTHETIC_LAYOUT = ["/home", "/home/user", "/tmp", "/dev"]
-
-
 @dataclass
 class CreateBashOptions:
     api_key: str
@@ -48,7 +45,7 @@ class CreateBashOptions:
     base_url: str | None = None
     eager_load: bool = True
     eager_content: bool = True
-    cwd: str = "/home/user"
+    cwd: str = "/"
     env: dict[str, str] | None = None
     cache_ttl_ms: int | None = 150_000
 
@@ -69,15 +66,12 @@ async def create_bash(
     base_url: str | None = None,
     eager_load: bool = True,
     eager_content: bool = True,
-    cwd: str = "/home/user",
+    cwd: str = "/",
     env: dict[str, str] | None = None,
     cache_ttl_ms: int | None = 150_000,
 ) -> CreateBashResult:
     client = SupermemoryClient(api_key, base_url=base_url)
     volume = SupermemoryVolume(client, container_tag, cache_ttl_ms=cache_ttl_ms)
-
-    for d in SYNTHETIC_LAYOUT:
-        volume.mark_synthetic_dir(d)
 
     async def warm() -> None:
         await volume.list_by_prefix("/", with_content=eager_content)
