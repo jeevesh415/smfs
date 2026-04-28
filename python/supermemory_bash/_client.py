@@ -87,3 +87,9 @@ class SupermemoryClient:
             "PATCH", f"/v3/container-tags/{quote(tag, safe='')}", json=body
         )
         return result
+
+    # --- Profile ---
+
+    async def profile(self, params: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = await self._request("POST", "/v4/profile", json=params)
+        return result

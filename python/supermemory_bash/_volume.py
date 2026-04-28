@@ -71,7 +71,33 @@ class RemoveByPrefixResult:
     errors: list[Exception] = field(default_factory=list)
 
 
+PROFILE_HEADER = """# Memory Profile
+
+This file is auto-generated from your memories. To change what appears
+here, modify the source files in your folder.
+"""
+
+
+def format_profile(resp: dict[str, Any]) -> str:
+    profile = resp.get("profile") or {}
+    static_items = profile.get("static") or []
+    dynamic_items = profile.get("dynamic") or []
+    if not static_items and not dynamic_items:
+        return f"{PROFILE_HEADER}\n(no memories extracted yet — write some files and check back in a few minutes)\n"
+    parts: list[str] = [PROFILE_HEADER]
+    if static_items:
+        parts.append("\n## Core Knowledge\n")
+        for item in static_items:
+            parts.append(f"- {item}\n")
+    if dynamic_items:
+        parts.append("\n## Recent Context\n")
+        for item in dynamic_items:
+            parts.append(f"- {item}\n")
+    return "".join(parts)
+
+
 class SupermemoryVolume:
+    PROFILE_PATH = "/profile.md"
     ALL_PATHS_TTL_MS = 60_000
     ALL_PATHS_HARD_CAP = 5000
 
@@ -179,7 +205,26 @@ class SupermemoryVolume:
             raise enoent(path)
         return await self.add_doc(path, content)
 
+    def is_reserved_path(self, path: str) -> bool:
+        return path == self.PROFILE_PATH
+
+    async def fetch_profile(self) -> str:
+        cached = self.cache.get(self.PROFILE_PATH)
+        if cached and isinstance(cached.content, str):
+            return cached.content
+        try:
+            resp = await self.client.profile({"containerTag": self.container_tag})
+        except Exception as err:
+            raise eio(f"profile: {err}") from err
+        body = format_profile(resp)
+        self.cache.set(self.PROFILE_PATH, body, "done")
+        return body
+
     async def get_doc(self, path: str) -> DocResult | None:
+        if self.is_reserved_path(path):
+            body = await self.fetch_profile()
+            return DocResult(id="virtual:profile", content=body, status="done", virtual=True)
+
         cached = self.cache.get(path)
         if cached:
             doc_id = self.path_index.resolve(path)
@@ -379,6 +424,20 @@ class SupermemoryVolume:
                 self.cache.set(fp, content, status)
             if len(out) >= max_items:
                 break
+
+        # Inject /profile.md at root listings so `ls /` surfaces the virtual file.
+        if prefix in ("", "/") and not exact:
+            already = any(s.filepath == self.PROFILE_PATH for s in out)
+            if not already:
+                out.append(
+                    DocSummary(
+                        id="virtual:profile",
+                        filepath=self.PROFILE_PATH,
+                        status="done",
+                        size=0,
+                        mtime=time.time(),
+                    )
+                )
         return out
 
     async def list_all_paths(self) -> list[str]:
@@ -407,6 +466,16 @@ class SupermemoryVolume:
         return paths
 
     async def stat_doc(self, path: str) -> DocStat | None:
+        if self.is_reserved_path(path):
+            body = await self.fetch_profile()
+            return DocStat(
+                is_file=True,
+                is_directory=False,
+                size=len(body.encode()),
+                mtime=time.time(),
+                status="done",
+            )
+
         if self.path_index.is_directory(path) and not self.path_index.is_file(path):
             return DocStat(is_file=False, is_directory=True, size=0, mtime=0.0)
 
