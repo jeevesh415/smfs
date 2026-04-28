@@ -273,3 +273,57 @@ describe("SupermemoryFs reserved file /profile.md", () => {
     });
   });
 });
+
+describe("SupermemoryFs nested-synthetic-dir handling (v6 PR review)", () => {
+  it("rm -r evicts nested synthetic dirs under the prefix", async () => {
+    const { fs, volume } = makeFs();
+    await fs.mkdir("/a/b/c", { recursive: true });
+    expect(volume.pathIndex.isDirectory("/a/b")).toBe(true);
+    await fs.rm("/a", { recursive: true });
+    expect(volume.pathIndex.isDirectory("/a")).toBe(false);
+    expect(volume.pathIndex.isDirectory("/a/b")).toBe(false);
+    expect(volume.pathIndex.isDirectory("/a/b/c")).toBe(false);
+  });
+
+  it("rmdir refuses to remove a dir that has only synthetic children", async () => {
+    const { fs, volume } = makeFs();
+    await fs.mkdir("/a/b", { recursive: true });
+    await expect(fs.rmdir("/a")).rejects.toMatchObject({ code: "ENOTEMPTY" });
+    expect(volume.pathIndex.isDirectory("/a")).toBe(true);
+    expect(volume.pathIndex.isDirectory("/a/b")).toBe(true);
+  });
+
+  it("mv of a tree migrates synthetic subdirs to dest", async () => {
+    const memories = [
+      { id: "f1", filepath: "/src/file.md", status: "done", updatedAt: "2026-01-01" },
+    ];
+    const { fs, volume } = makeFs({
+      listResp: { memories, pagination: { currentPage: 1, totalPages: 1, totalItems: 1 } },
+    });
+    volume.pathIndex.insert("/src/file.md", "f1");
+    await fs.mkdir("/src/empty", { recursive: true });
+    await fs.mv("/src", "/dst");
+    expect(volume.pathIndex.isDirectory("/dst/empty")).toBe(true);
+    expect(volume.pathIndex.isDirectory("/src/empty")).toBe(false);
+  });
+
+  it("cp -r of a tree replicates synthetic subdirs at dest", async () => {
+    const memories = [
+      {
+        id: "f1",
+        filepath: "/src/file.md",
+        status: "done",
+        updatedAt: "2026-01-01",
+        content: "hi",
+      },
+    ];
+    const { fs, volume } = makeFs({
+      listResp: { memories, pagination: { currentPage: 1, totalPages: 1, totalItems: 1 } },
+    });
+    volume.pathIndex.insert("/src/file.md", "f1");
+    await fs.mkdir("/src/empty", { recursive: true });
+    await fs.cp("/src", "/dst", { recursive: true });
+    expect(volume.pathIndex.isDirectory("/dst/empty")).toBe(true);
+    expect(volume.pathIndex.isDirectory("/src/empty")).toBe(true);
+  });
+});

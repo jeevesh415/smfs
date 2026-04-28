@@ -247,7 +247,6 @@ export class SupermemoryFs implements IFileSystem {
       if (!options?.recursive) throw eisdir(norm);
       const prefix = norm.endsWith("/") ? norm : `${norm}/`;
       const result = await this.volume.removeByPrefix(prefix);
-      this.volume.pathIndex.removeSyntheticDir(norm);
       if (result.errors.length > 0 && !options.force) {
         throw eio(`rm(${norm}): ${result.errors.length} subpath(s) failed to delete`);
       }
@@ -269,10 +268,8 @@ export class SupermemoryFs implements IFileSystem {
   async rmdir(path: string, _options?: RmOptions): Promise<void> {
     const norm = normalizePath(path);
     if (this.volume.pathIndex.isFile(norm)) throw enotdir(norm);
-    const prefix = norm === "/" ? "/" : `${norm}/`;
-    const probe = await this.volume.listByPrefix(prefix, { limit: 1 });
-    if (probe.length > 0) throw enotempty(norm);
     if (!this.volume.pathIndex.isDirectory(norm)) throw enoent(norm);
+    if (!(await this.volume.isDirEmpty(norm))) throw enotempty(norm);
     this.volume.pathIndex.removeSyntheticDir(norm);
   }
 
@@ -283,40 +280,14 @@ export class SupermemoryFs implements IFileSystem {
     if (this.volume.isReservedPath(destN)) throw eperm(destN, "rename");
     const isDir = this.volume.pathIndex.isDirectory(srcN) && !this.volume.pathIndex.isFile(srcN);
     if (isDir) {
-      return this.mvDirectory(srcN, destN);
-    }
-    await this.volume.moveDoc(srcN, destN);
-  }
-
-  private async mvDirectory(srcDir: string, destDir: string): Promise<void> {
-    const srcPrefix = srcDir.endsWith("/") ? srcDir : `${srcDir}/`;
-    const destPrefix = destDir.endsWith("/") ? destDir : `${destDir}/`;
-    const entries = await this.volume.listByPrefix(srcPrefix);
-    if (entries.length === 0) {
-      if (!this.volume.pathIndex.isDirectory(srcDir)) throw enoent(srcDir);
-      this.volume.pathIndex.removeSyntheticDir(srcDir);
-      this.volume.markSyntheticDir(destDir);
+      if (!this.volume.pathIndex.isDirectory(srcN)) throw enoent(srcN);
+      const result = await this.volume.moveTree(srcN, destN);
+      if (result.errors.length > 0) {
+        throw eio(`mv(${srcN} → ${destN}): ${result.errors.length} subpath(s) failed`);
+      }
       return;
     }
-    const errors: Error[] = [];
-    const concurrency = 4;
-    for (let i = 0; i < entries.length; i += concurrency) {
-      const batch = entries.slice(i, i + concurrency);
-      await Promise.all(
-        batch.map(async (e) => {
-          const newPath = destPrefix + e.filepath.slice(srcPrefix.length);
-          try {
-            await this.volume.moveDoc(e.filepath, newPath);
-          } catch (err) {
-            errors.push(err as Error);
-          }
-        }),
-      );
-    }
-    this.volume.pathIndex.removeSyntheticDir(srcDir);
-    if (errors.length > 0) {
-      throw eio(`mv(${srcDir} → ${destDir}): ${errors.length} of ${entries.length} failed`);
-    }
+    await this.volume.moveDoc(srcN, destN);
   }
 
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
@@ -331,40 +302,15 @@ export class SupermemoryFs implements IFileSystem {
     const isDir = this.volume.pathIndex.isDirectory(srcN) && !this.volume.pathIndex.isFile(srcN);
     if (isDir) {
       if (!options?.recursive) throw eisdir(srcN);
-      return this.cpDirectory(srcN, destN);
+      const result = await this.volume.copyTree(srcN, destN);
+      if (result.errors.length > 0) {
+        throw eio(`cp(${srcN} → ${destN}): ${result.errors.length} subpath(s) failed`);
+      }
+      return;
     }
     const doc = await this.volume.getDoc(srcN);
     if (!doc) throw enoent(srcN);
     await this.volume.addDoc(destN, doc.content);
-  }
-
-  private async cpDirectory(srcDir: string, destDir: string): Promise<void> {
-    const srcPrefix = srcDir.endsWith("/") ? srcDir : `${srcDir}/`;
-    const destPrefix = destDir.endsWith("/") ? destDir : `${destDir}/`;
-    const entries = await this.volume.listByPrefix(srcPrefix, { withContent: true });
-    if (entries.length === 0) {
-      if (!this.volume.pathIndex.isDirectory(srcDir)) throw enoent(srcDir);
-      this.volume.markSyntheticDir(destDir);
-      return;
-    }
-    const errors: Error[] = [];
-    const concurrency = 4;
-    for (let i = 0; i < entries.length; i += concurrency) {
-      const batch = entries.slice(i, i + concurrency);
-      await Promise.all(
-        batch.map(async (e) => {
-          const newPath = destPrefix + e.filepath.slice(srcPrefix.length);
-          try {
-            await this.volume.addDoc(newPath, e.content ?? "");
-          } catch (err) {
-            errors.push(err as Error);
-          }
-        }),
-      );
-    }
-    if (errors.length > 0) {
-      throw eio(`cp(${srcDir} → ${destDir}): ${errors.length} of ${entries.length} failed`);
-    }
   }
 
   async chmod(_path: string, _mode: number): Promise<void> {

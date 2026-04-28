@@ -303,8 +303,18 @@ export class SupermemoryVolume {
         this.cache.delete(p);
       }
     }
+    this.evictSyntheticUnder(prefix);
 
     return { deleted, errors };
+  }
+
+  private evictSyntheticUnder(prefix: string): void {
+    const dirSelf = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+    for (const d of this.pathIndex.syntheticDirPaths()) {
+      if (d === dirSelf || d.startsWith(prefix)) {
+        this.pathIndex.removeSyntheticDir(d);
+      }
+    }
   }
 
   private async removeByPrefixViaList(prefix: string): Promise<RemoveByPrefixResult> {
@@ -341,6 +351,7 @@ export class SupermemoryVolume {
         this.cache.delete(m.filepath);
       }
     }
+    if (errors.length === 0) this.evictSyntheticUnder(prefix);
     return { deleted, errors };
   }
 
@@ -488,6 +499,75 @@ export class SupermemoryVolume {
 
   markSyntheticDir(path: string): void {
     this.pathIndex.markSyntheticDir(path);
+  }
+
+  async isDirEmpty(path: string): Promise<boolean> {
+    const prefix = path === "/" ? "/" : `${path}/`;
+    const probe = await this.listByPrefix(prefix, { limit: 1 });
+    if (probe.length > 0) return false;
+    for (const d of this.pathIndex.syntheticDirPaths()) {
+      if (d !== path && d.startsWith(prefix)) return false;
+    }
+    return true;
+  }
+
+  async moveTree(src: string, dest: string): Promise<{ errors: Error[] }> {
+    const srcPrefix = src.endsWith("/") ? src : `${src}/`;
+    const destPrefix = dest.endsWith("/") ? dest : `${dest}/`;
+    const entries = await this.listByPrefix(srcPrefix);
+    const errors: Error[] = [];
+    const concurrency = 4;
+    for (let i = 0; i < entries.length; i += concurrency) {
+      const batch = entries.slice(i, i + concurrency);
+      await Promise.all(
+        batch.map(async (e) => {
+          const newPath = destPrefix + e.filepath.slice(srcPrefix.length);
+          try {
+            await this.moveDoc(e.filepath, newPath);
+          } catch (err) {
+            errors.push(err as Error);
+          }
+        }),
+      );
+    }
+    for (const d of this.pathIndex.syntheticDirPaths()) {
+      if (d === src) {
+        this.pathIndex.removeSyntheticDir(d);
+      } else if (d.startsWith(srcPrefix)) {
+        this.pathIndex.removeSyntheticDir(d);
+        this.pathIndex.markSyntheticDir(destPrefix + d.slice(srcPrefix.length));
+      }
+    }
+    this.pathIndex.markSyntheticDir(dest);
+    return { errors };
+  }
+
+  async copyTree(src: string, dest: string): Promise<{ errors: Error[] }> {
+    const srcPrefix = src.endsWith("/") ? src : `${src}/`;
+    const destPrefix = dest.endsWith("/") ? dest : `${dest}/`;
+    const entries = await this.listByPrefix(srcPrefix, { withContent: true });
+    const errors: Error[] = [];
+    const concurrency = 4;
+    for (let i = 0; i < entries.length; i += concurrency) {
+      const batch = entries.slice(i, i + concurrency);
+      await Promise.all(
+        batch.map(async (e) => {
+          const newPath = destPrefix + e.filepath.slice(srcPrefix.length);
+          try {
+            await this.addDoc(newPath, e.content ?? "");
+          } catch (err) {
+            errors.push(err as Error);
+          }
+        }),
+      );
+    }
+    for (const d of this.pathIndex.syntheticDirPaths()) {
+      if (d.startsWith(srcPrefix)) {
+        this.pathIndex.markSyntheticDir(destPrefix + d.slice(srcPrefix.length));
+      }
+    }
+    this.pathIndex.markSyntheticDir(dest);
+    return { errors };
   }
 
   async search(params: SearchParams): Promise<SearchResp> {
