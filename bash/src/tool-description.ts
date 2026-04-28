@@ -1,6 +1,6 @@
 export const TOOL_DESCRIPTION = `You have access to a bash environment whose filesystem is your Supermemory container. Files you write here persist across sessions and are searchable by the rest of your tooling.
 
-Default working directory: /home/user. Common Linux dirs (/home, /tmp, /usr, /bin, /dev, /proc) exist as conventions but are mostly empty. Your own files can live anywhere — typically /notes/, /work/, /journal/, or wherever you decide.
+Default working directory: \`/\`. The entire filesystem is yours — organize it however you want.
 
 Standard shell commands work as expected: pwd, cd, ls, cat, stat, mkdir, rm, rmdir, mv, cp, echo, grep, head, tail, wc, sort, sed, awk, find, [ -f ], [ -d ], pipes, redirects, variables, conditionals, loops. You can read, write, append, move, copy, and delete files freely.
 

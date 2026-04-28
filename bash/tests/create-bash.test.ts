@@ -23,17 +23,13 @@ describe("createBash factory", () => {
     fetchSpy.mockRestore();
   });
 
-  it("marks the standard Linux layout as synthetic dirs", async () => {
+  it("does not pre-populate any synthetic dirs at boot", async () => {
     const { volume } = await createBash({
       apiKey: "stub",
       containerTag: "test_b6_layout",
       eagerLoad: false,
     });
-    for (const dir of ["/home", "/home/user", "/tmp", "/dev"]) {
-      expect(volume.pathIndex.isDirectory(dir)).toBe(true);
-    }
-    // /usr/bin must NOT be synthetic — see create-bash.ts comment for why.
-    expect(volume.pathIndex.isDirectory("/usr/bin")).toBe(false);
+    expect(volume.pathIndex.syntheticDirPaths()).toEqual([]);
   });
 
   it("registers sgrep as a custom command (sgrep --help works)", async () => {

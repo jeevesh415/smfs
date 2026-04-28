@@ -47,6 +47,24 @@ export class PathIndex {
     return false;
   }
 
+  findAncestorFile(path: string): string | null {
+    const segments = path.split("/").filter((s) => s !== "");
+    for (let i = segments.length - 1; i >= 1; i--) {
+      const ancestor = `/${segments.slice(0, i).join("/")}`;
+      if (this.files.has(ancestor)) return ancestor;
+    }
+    return null;
+  }
+
+  hasDescendant(path: string): boolean {
+    if (path === "/" || path === "") return false;
+    const prefix = path.endsWith("/") ? path : `${path}/`;
+    for (const f of this.files.keys()) {
+      if (f.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
   paths(): string[] {
     return Array.from(this.files.keys()).sort();
   }

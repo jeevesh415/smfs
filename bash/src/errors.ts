@@ -40,3 +40,6 @@ export const efbig = (path: string): FsError => make("EFBIG", -27, `file too lar
 
 export const ebusy = (path: string): FsError =>
   make("EBUSY", -16, `resource busy or locked, '${path}'`);
+
+export const enametoolong = (path: string): FsError =>
+  make("ENAMETOOLONG", -36, `file name too long, '${path}'`);

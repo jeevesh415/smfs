@@ -1,11 +1,23 @@
-# supermemoryfs
+# smfs
 
-Your Supermemory container, exposed as a filesystem. Read, write, and `grep` your memory like any local directory — and let coding agents do the same with the Unix verbs they already know.
+Your Supermemory container, exposed as a filesystem. Read, write, and `grep` your memory like any local directory.
 
-Two ways in, depending on whether the agent has a real filesystem:
+Two access flows depending on the runtime:
 
-- **Mount it as a directory** — for anywhere a real filesystem exists: your laptop, devcontainers, Codespaces, Docker / Firecracker / dev-sandbox VMs. Coding agents (Claude Code, Cursor, anything that reads files) treat Supermemory as a folder.
-- **Plug the virtual bash tool into the agent's tool-set** — for runtimes with no local filesystem at all: Cloudflare Workers, serverless functions, edge runtimes, browser-based agents. The agent calls `run_bash` and uses every Unix command it already knows.
+- **Mount it as a directory.** A real local folder for editors, scripts, and any tool that reads files. Works wherever a kernel and filesystem exist (macOS, Linux, devcontainers, Codespaces, Docker, microVMs).
+- **Plug the virtual bash tool into the agent's tool-set.** A TypeScript package for runtimes with no local filesystem at all: Cloudflare Workers, serverless functions, edge runtimes, browser-based agents.
+
+## Contents
+
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Memory generation paths](#memory-generation-paths)
+- [Commands](#commands)
+- [Mount flags](#mount-flags)
+- [Semantic search](#semantic-search)
+- [`bash/` virtual bash tool](#bash-virtual-bash-tool)
+- [Build from source](#build-from-source)
+- [License](#license)
 
 ## Install
 
@@ -15,26 +27,104 @@ curl -fsSL https://files.supermemory.ai/install.sh | bash
 
 Supports macOS (arm64, x64) and Linux (arm64, x64).
 
-## `mount/` — Supermemory as a real filesystem
+You'll need a Supermemory API key. Get one at [supermemory.ai](https://supermemory.ai).
 
-Mounts a Supermemory container as a real directory anywhere you have a kernel and a filesystem — your laptop, a devcontainer, a Codespaces image, a Docker / Firecracker microVM, any dev sandbox that supports FUSE or NFS. NFSv3 on macOS (no kernel extension required), FUSE on Linux. Works with `ls`, `cat`, `cp`, `grep`, VS Code, Finder, and every coding agent that reads files — Claude Code, Cursor, anything that talks to the local filesystem.
-
-```sh
-smfs mount ~/memory
-ls ~/memory
-```
-
-Build from source:
+## Quickstart
 
 ```sh
-cd mount
-cargo build
-cargo run -- --help
+smfs login                  # one-time, stores your API key
+smfs mount agent_memory     # mounts the container tag at ./agent_memory/
+ls agent_memory/
+cat agent_memory/memory/notes.md
 ```
 
-## `bash/` — virtual bash tool for filesystem-less runtimes
+`smfs mount <container_tag>` mounts the named Supermemory container as a real directory. By default the folder name matches the container tag and lands in your current working directory. Override with `--path /somewhere/else`.
 
-A TypeScript package (`@supermemory/bash`) for AI agents running where there is no local filesystem to mount onto — Cloudflare Workers, AWS / Vercel serverless functions, edge runtimes, browser-based agents. The bash tool *is* the filesystem: drop a single `run_bash` tool into the agent's tool-set, and the agent uses every Unix command it already knows — `ls`, `cat`, `grep`, `mv`, `cp`, `find`, pipes, redirects — plus an `sgrep` command for semantic search across the whole container.
+Inside the mount, files behave like any other folder: edit them, `cat` them, `grep` them, point your editor at them. Writes upload to Supermemory in the background; remote changes pull in every 30 seconds.
+
+Unmount when done:
+
+```sh
+smfs unmount agent_memory
+```
+
+## Memory generation paths
+
+Files stored in a mount are durable everywhere, but only files under the container's **memory paths** get processed by Supermemory's memory pipeline (the part that extracts structured facts and makes them semantically searchable). Everything else is plain durable storage.
+
+By default the server applies its built-in path scope per container. Override it for a mount with `--memory-paths`:
+
+```sh
+# Scope memory generation to specific paths
+# Trailing slash = match any file inside that folder recursively
+# No trailing slash = exact file match
+smfs mount agent_memory --memory-paths "/notes/,/journal.md,/work/"
+
+# Disable memory generation entirely (mount becomes pure storage)
+smfs mount agent_memory --memory-paths ""
+
+# Omit the flag entirely to leave the existing server config alone
+smfs mount agent_memory
+```
+
+The flag writes the configuration to the container tag, so the next mount sees the same scope until you change it again.
+
+## Commands
+
+```
+smfs login                      one-time auth, stores API key locally
+smfs whoami                     show current user, org, API endpoint
+smfs mount <tag>                mount a container tag
+smfs unmount <tag>              unmount and drain pending pushes
+smfs list                       show all running mounts
+smfs status <tag>               daemon health and queue depth
+smfs logs <tag>                 tail the daemon log
+smfs sync <tag>                 force a sync cycle now
+smfs grep "query" [path]        semantic search inside a container
+smfs init                       install the grep shell wrapper
+smfs install                    self-install the binary to ~/.local/bin
+smfs logout                     remove stored credentials
+```
+
+Run `smfs --help` or `smfs <command> --help` for full flag listings.
+
+## Mount flags
+
+```
+--path <DIR>             override the mount path (default: ./<tag>/)
+--backend fuse|nfs       defaults: fuse on Linux, nfs on macOS
+--foreground             run in foreground instead of detaching
+--memory-paths "<csv>"   which paths produce memories (see above)
+--ephemeral              in-memory cache; nothing persists after unmount
+--clean                  wipe local cache before mounting
+--sync-interval <secs>   pull interval, default 30
+--no-sync                disable the pull side; local writes still push
+--drain-timeout <secs>   max wait at unmount to drain the push queue, default 30
+--key <KEY>              API key (otherwise resolved from stored credentials)
+--api-url <URL>          override the API base URL
+```
+
+## Semantic search via plain `grep`
+
+Run `smfs init` once. After that, `grep` inside any mount routes through Supermemory's semantic index automatically when called without flags. No new command to learn, no new tool to teach an agent.
+
+```sh
+cd agent_memory/
+
+grep "OAuth refresh tokens"          # semantic: finds files about the topic
+grep "design review notes" work/     # semantic, scoped to a directory
+
+grep -F "exact string" notes.md      # any flag falls through to real grep
+grep -rF "literal" .                 # also real grep (literal substring)
+```
+
+The wrapper detects when your shell is inside an smfs mount via a hidden `.smfs` marker. Outside a mount, `grep` is unchanged. Inside a mount, flagless `grep` is semantic and flagged `grep` is literal: that split is the whole UX.
+
+If you need to run a semantic search from outside a mount, `smfs grep "query" --tag <container_tag>` does the same thing without the wrapper.
+
+## `bash/` virtual bash tool
+
+A TypeScript package (`@supermemory/bash`) for AI agents running where there is no local filesystem to mount onto: Cloudflare Workers, serverless functions, edge runtimes, browser-based agents. The bash tool *is* the filesystem. Drop a single `run_bash` tool into the agent's tool-set, and the agent uses every Unix command it already knows, plus an `sgrep` command for semantic search across the whole container.
 
 ```ts
 import { createBash } from "@supermemory/bash";
@@ -48,4 +138,17 @@ await bash.exec("echo 'hello' > /a.md && cat /a.md");
 await bash.exec("sgrep 'authentication tokens'");
 ```
 
-See [`bash/README.md`](bash/README.md) for the full quickstart, options, and Anthropic + Vercel AI SDK integrations.
+Full quickstart, options, and Vercel AI SDK examples: [`bash/README.md`](bash/README.md).
+
+## Build from source
+
+```sh
+cargo build --release
+./target/release/smfs --help
+```
+
+Requires Rust 1.80 or newer.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
