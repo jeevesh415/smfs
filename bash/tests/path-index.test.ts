@@ -124,4 +124,43 @@ describe("PathIndex", () => {
     idx.remove("/a.md");
     expect(idx.size()).toBe(1);
   });
+
+  it("findAncestorFile walks up and returns first known file", () => {
+    const idx = new PathIndex();
+    idx.insert("/a/b.md", "doc1");
+    expect(idx.findAncestorFile("/a/b.md/c.md")).toBe("/a/b.md");
+    expect(idx.findAncestorFile("/a/b.md/c/d.md")).toBe("/a/b.md");
+  });
+
+  it("findAncestorFile returns null when no ancestor is a file", () => {
+    const idx = new PathIndex();
+    idx.insert("/a/b.md", "doc1");
+    expect(idx.findAncestorFile("/a/c.md")).toBeNull();
+    expect(idx.findAncestorFile("/x.md")).toBeNull();
+  });
+
+  it("findAncestorFile does not return the path itself", () => {
+    const idx = new PathIndex();
+    idx.insert("/a.md", "doc1");
+    expect(idx.findAncestorFile("/a.md")).toBeNull();
+  });
+
+  it("hasDescendant returns true when a doc exists under prefix", () => {
+    const idx = new PathIndex();
+    idx.insert("/foo.md/bar.md", "doc1");
+    expect(idx.hasDescendant("/foo.md")).toBe(true);
+  });
+
+  it("hasDescendant returns false when no descendants", () => {
+    const idx = new PathIndex();
+    idx.insert("/foo.md", "doc1");
+    expect(idx.hasDescendant("/foo.md")).toBe(false);
+    expect(idx.hasDescendant("/bar")).toBe(false);
+  });
+
+  it("hasDescendant does not match by partial prefix (trailing slash)", () => {
+    const idx = new PathIndex();
+    idx.insert("/foo.markdown", "doc1");
+    expect(idx.hasDescendant("/foo.md")).toBe(false);
+  });
 });

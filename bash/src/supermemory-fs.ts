@@ -7,8 +7,18 @@ import type {
   MkdirOptions,
   RmOptions,
 } from "just-bash";
-import { eexist, eio, eisdir, enoent, enosys, enotdir, enotempty, FsError } from "./errors.js";
-import type { SupermemoryVolume } from "./volume.js";
+import {
+  eexist,
+  eio,
+  eisdir,
+  enoent,
+  enosys,
+  enotdir,
+  enotempty,
+  eperm,
+  FsError,
+} from "./errors.js";
+import { SupermemoryVolume } from "./volume.js";
 
 // Mirrored from just-bash/fs/interface.ts — not re-exported there.
 interface ReadFileOptions {
@@ -60,6 +70,21 @@ export class SupermemoryFs implements IFileSystem {
 
   async stat(path: string): Promise<FsStat> {
     const norm = normalizePath(path);
+    if (this.volume.isReservedPath(norm)) {
+      const cached = this.volume.cache.get(norm);
+      const size =
+        cached && typeof cached.content === "string"
+          ? new TextEncoder().encode(cached.content).length
+          : 0;
+      return {
+        isFile: true,
+        isDirectory: false,
+        isSymbolicLink: false,
+        mode: 0o444,
+        size,
+        mtime: new Date(),
+      };
+    }
     const docStat = await this.volume.statDoc(norm);
     if (!docStat) throw enoent(norm);
     return {
@@ -78,6 +103,7 @@ export class SupermemoryFs implements IFileSystem {
 
   async readFile(path: string, _options?: ReadFileOptions | BufferEncoding): Promise<string> {
     const norm = normalizePath(path);
+    if (this.volume.isReservedPath(norm)) return this.volume.fetchProfile();
     if (this.volume.pathIndex.isDirectory(norm) && !this.volume.pathIndex.isFile(norm)) {
       throw eisdir(norm);
     }
@@ -88,6 +114,10 @@ export class SupermemoryFs implements IFileSystem {
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const norm = normalizePath(path);
+    if (this.volume.isReservedPath(norm)) {
+      const body = await this.volume.fetchProfile();
+      return new TextEncoder().encode(body);
+    }
     if (this.volume.pathIndex.isDirectory(norm) && !this.volume.pathIndex.isFile(norm)) {
       throw eisdir(norm);
     }
@@ -135,6 +165,12 @@ export class SupermemoryFs implements IFileSystem {
         entries.set(rest, { isFile: false, isDirectory: true });
       }
     }
+    if (norm === "/") {
+      const reservedName = SupermemoryVolume.PROFILE_PATH.slice(1);
+      if (!entries.has(reservedName)) {
+        entries.set(reservedName, { isFile: true, isDirectory: false });
+      }
+    }
 
     return [...entries.entries()]
       .map(([name, kind]) => ({
@@ -152,6 +188,7 @@ export class SupermemoryFs implements IFileSystem {
     _options?: WriteFileOptions | BufferEncoding,
   ): Promise<void> {
     const norm = normalizePath(path);
+    if (this.volume.isReservedPath(norm)) throw eperm(norm, "write");
     if (this.volume.pathIndex.isDirectory(norm) && !this.volume.pathIndex.isFile(norm)) {
       throw eisdir(norm);
     }
@@ -166,6 +203,7 @@ export class SupermemoryFs implements IFileSystem {
     _options?: WriteFileOptions | BufferEncoding,
   ): Promise<void> {
     const norm = normalizePath(path);
+    if (this.volume.isReservedPath(norm)) throw eperm(norm, "write");
     if (this.volume.pathIndex.isDirectory(norm) && !this.volume.pathIndex.isFile(norm)) {
       throw eisdir(norm);
     }
@@ -184,6 +222,7 @@ export class SupermemoryFs implements IFileSystem {
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
     const norm = normalizePath(path);
+    if (this.volume.isReservedPath(norm)) throw eperm(norm, "mkdir");
     if (this.volume.pathIndex.isFile(norm)) throw enotdir(norm);
     if (this.volume.pathIndex.isDirectory(norm) && !options?.recursive) {
       throw eexist(norm);
@@ -202,6 +241,7 @@ export class SupermemoryFs implements IFileSystem {
 
   async rm(path: string, options?: RmOptions): Promise<void> {
     const norm = normalizePath(path);
+    if (this.volume.isReservedPath(norm)) throw eperm(norm, "unlink");
     const isDir = this.volume.pathIndex.isDirectory(norm) && !this.volume.pathIndex.isFile(norm);
     if (isDir) {
       if (!options?.recursive) throw eisdir(norm);
@@ -239,6 +279,8 @@ export class SupermemoryFs implements IFileSystem {
   async mv(src: string, dest: string): Promise<void> {
     const srcN = normalizePath(src);
     const destN = normalizePath(dest);
+    if (this.volume.isReservedPath(srcN)) throw eperm(srcN, "rename");
+    if (this.volume.isReservedPath(destN)) throw eperm(destN, "rename");
     const isDir = this.volume.pathIndex.isDirectory(srcN) && !this.volume.pathIndex.isFile(srcN);
     if (isDir) {
       return this.mvDirectory(srcN, destN);
@@ -280,6 +322,12 @@ export class SupermemoryFs implements IFileSystem {
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
     const srcN = normalizePath(src);
     const destN = normalizePath(dest);
+    if (this.volume.isReservedPath(destN)) throw eperm(destN, "write");
+    if (this.volume.isReservedPath(srcN)) {
+      const body = await this.volume.fetchProfile();
+      await this.volume.addDoc(destN, body);
+      return;
+    }
     const isDir = this.volume.pathIndex.isDirectory(srcN) && !this.volume.pathIndex.isFile(srcN);
     if (isDir) {
       if (!options?.recursive) throw eisdir(srcN);
@@ -344,6 +392,7 @@ export class SupermemoryFs implements IFileSystem {
     const paths = new Set<string>();
     // Root must be present so `ls /` resolves (matches InMemoryFs).
     paths.add("/");
+    paths.add(SupermemoryVolume.PROFILE_PATH);
     for (const p of this.volume.cachedAllPaths()) {
       paths.add(p);
       const segments = p.split("/").filter(Boolean);

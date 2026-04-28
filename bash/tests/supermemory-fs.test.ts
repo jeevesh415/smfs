@@ -157,3 +157,119 @@ describe("SupermemoryFs write-path branch decisions", () => {
     expect(add.mock.calls[0]?.[0]).toMatchObject({ content: "tail", filepath: "/new.md" });
   });
 });
+
+describe("SupermemoryFs reserved file /profile.md", () => {
+  function makeFsWithProfile(profileBody: { static: string[]; dynamic: string[] }) {
+    const list = vi.fn().mockResolvedValue(emptyListResp);
+    const profile = vi.fn().mockResolvedValue({ profile: profileBody });
+    const add = vi.fn().mockResolvedValue({ id: "snap-1", status: "done" });
+    const client = {
+      documents: { add, update: vi.fn(), get: vi.fn(), delete: vi.fn(), deleteBulk: vi.fn(), list },
+      profile,
+    } as unknown as Supermemory;
+    const volume = new SupermemoryVolume(client, "tag");
+    const fs = new SupermemoryFs(volume);
+    return { fs, volume, profile, add };
+  }
+
+  it("readFile('/profile.md') returns the rendered profile body", async () => {
+    const { fs, profile } = makeFsWithProfile({ static: ["s1"], dynamic: ["d1"] });
+    const body = await fs.readFile("/profile.md");
+    expect(body).toContain("# Memory Profile");
+    expect(body).toContain("- s1");
+    expect(body).toContain("- d1");
+    expect(profile).toHaveBeenCalledTimes(1);
+  });
+
+  it("readFileBuffer('/profile.md') returns same body as bytes", async () => {
+    const { fs } = makeFsWithProfile({ static: ["s1"], dynamic: [] });
+    const buf = await fs.readFileBuffer("/profile.md");
+    const decoded = new TextDecoder().decode(buf);
+    expect(decoded).toContain("- s1");
+  });
+
+  it("stat('/profile.md') returns file mode 0o444", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    const s = await fs.stat("/profile.md");
+    expect(s.isFile).toBe(true);
+    expect(s.isDirectory).toBe(false);
+    expect(s.mode).toBe(0o444);
+  });
+
+  it("stat('/profile.md') size reflects cached body after first read", async () => {
+    const { fs } = makeFsWithProfile({ static: ["a"], dynamic: [] });
+    expect((await fs.stat("/profile.md")).size).toBe(0);
+    const body = await fs.readFile("/profile.md");
+    expect((await fs.stat("/profile.md")).size).toBe(new TextEncoder().encode(body).length);
+  });
+
+  it("readdir('/') always lists profile.md, even on an empty container", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    const entries = await fs.readdirWithFileTypes("/");
+    const profileEntry = entries.find((e) => e.name === "profile.md");
+    expect(profileEntry).toBeDefined();
+    expect(profileEntry?.isFile).toBe(true);
+    expect(profileEntry?.isDirectory).toBe(false);
+  });
+
+  it("getAllPaths includes /profile.md", () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    expect(fs.getAllPaths()).toContain("/profile.md");
+  });
+
+  it("writeFile('/profile.md') throws EPERM", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    await expect(fs.writeFile("/profile.md", "x")).rejects.toThrowError(FsError);
+    await expect(fs.writeFile("/profile.md", "x")).rejects.toThrow(/EPERM/);
+  });
+
+  it("appendFile('/profile.md') throws EPERM", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    await expect(fs.appendFile("/profile.md", "x")).rejects.toThrow(/EPERM/);
+  });
+
+  it("rm('/profile.md') throws EPERM", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    await expect(fs.rm("/profile.md")).rejects.toThrow(/EPERM/);
+  });
+
+  it("mkdir('/profile.md') throws EPERM", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    await expect(fs.mkdir("/profile.md")).rejects.toThrow(/EPERM/);
+  });
+
+  it("mv with src=/profile.md throws EPERM", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    await expect(fs.mv("/profile.md", "/foo.md")).rejects.toThrow(/EPERM/);
+  });
+
+  it("mv with dest=/profile.md throws EPERM", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    await expect(fs.mv("/foo.md", "/profile.md")).rejects.toThrow(/EPERM/);
+  });
+
+  it("cp with dest=/profile.md throws EPERM", async () => {
+    const { fs } = makeFsWithProfile({ static: [], dynamic: [] });
+    await expect(fs.cp("/foo.md", "/profile.md")).rejects.toThrow(/EPERM/);
+  });
+
+  it("cp /profile.md /snap.md writes the rendered body to a normal doc", async () => {
+    const { fs, add } = makeFsWithProfile({ static: ["s1"], dynamic: [] });
+    await fs.cp("/profile.md", "/snap.md");
+    expect(add).toHaveBeenCalledTimes(1);
+    const args = add.mock.calls[0]?.[0] as { content: string; filepath: string };
+    expect(args.filepath).toBe("/snap.md");
+    expect(args.content).toContain("- s1");
+    expect(args.content).toContain("# Memory Profile");
+  });
+
+  it("subpath profile.md is NOT reserved (user can create /memory/profile.md)", async () => {
+    const { fs, add } = makeFsWithProfile({ static: [], dynamic: [] });
+    await fs.writeFile("/memory/profile.md", "user-owned profile");
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(add.mock.calls[0]?.[0]).toMatchObject({
+      content: "user-owned profile",
+      filepath: "/memory/profile.md",
+    });
+  });
+});

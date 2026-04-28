@@ -1,13 +1,8 @@
-import type {
-  BashLogger,
-  BashOptions,
-  CustomCommand,
-  JavaScriptConfig,
-  NetworkConfig,
-} from "just-bash";
+import type { BashExecResult, BashLogger, BashOptions, ExecOptions } from "just-bash";
 import { Bash } from "just-bash";
 import Supermemory from "supermemory";
 import { sgrepCommand } from "./commands/sgrep.js";
+import { FsError } from "./errors.js";
 import { SupermemoryFs } from "./supermemory-fs.js";
 import { TOOL_DESCRIPTION } from "./tool-description.js";
 import { SupermemoryVolume } from "./volume.js";
@@ -22,17 +17,8 @@ export interface CreateBashOptions {
   eagerLoad?: boolean;
   /** Also warm content cache during eager load. Default true. Set false for huge containers. */
   eagerContent?: boolean;
-  /** Default cwd for the bash session. Default "/home/user". */
-  cwd?: string;
   env?: Record<string, string>;
   executionLimits?: ExecutionLimits;
-  /** Custom commands appended after sgrep. */
-  customCommands?: CustomCommand[];
-  network?: NetworkConfig;
-  /** Enable python3 (off by default). */
-  python?: boolean;
-  /** Enable js-exec (off by default). */
-  javascript?: boolean | JavaScriptConfig;
   logger?: BashLogger;
   /**
    * Content-cache TTL in ms.
@@ -52,11 +38,6 @@ export interface CreateBashResult {
   refresh: () => Promise<void>;
 }
 
-// Excludes /bin, /usr/bin, /usr, /proc/* on purpose: if /usr/bin exists,
-// just-bash's command resolver sees it and refuses to fall through to
-// customCommands (sgrep returns 127).
-const SYNTHETIC_LAYOUT = ["/home", "/home/user", "/tmp", "/dev"];
-
 export async function createBash(opts: CreateBashOptions): Promise<CreateBashResult> {
   const client = new Supermemory({
     apiKey: opts.apiKey,
@@ -66,8 +47,6 @@ export async function createBash(opts: CreateBashOptions): Promise<CreateBashRes
     cacheOptions: opts.cacheTtlMs === undefined ? undefined : { ttlMs: opts.cacheTtlMs },
   });
   const fs = new SupermemoryFs(volume);
-
-  for (const dir of SYNTHETIC_LAYOUT) volume.markSyntheticDir(dir);
 
   const doWarm = async () => {
     await volume.listByPrefix("/", { withContent: opts.eagerContent ?? true });
@@ -83,17 +62,31 @@ export async function createBash(opts: CreateBashOptions): Promise<CreateBashRes
 
   const bash = new Bash({
     fs,
-    customCommands: [sgrepCommand, ...(opts.customCommands ?? [])],
-    cwd: opts.cwd ?? "/home/user",
+    customCommands: [sgrepCommand],
+    cwd: "/",
     env,
     // just-bash's defense-in-depth patches setTimeout, which the Supermemory SDK uses for retries.
     defenseInDepth: false,
     ...(opts.executionLimits ? { executionLimits: opts.executionLimits } : {}),
-    ...(opts.network ? { network: opts.network } : {}),
-    ...(opts.python !== undefined ? { python: opts.python } : {}),
-    ...(opts.javascript !== undefined ? { javascript: opts.javascript } : {}),
     ...(opts.logger ? { logger: opts.logger } : {}),
   });
+
+  const origExec = bash.exec.bind(bash);
+  bash.exec = async (cmd: string, options?: ExecOptions): Promise<BashExecResult> => {
+    try {
+      return await origExec(cmd, options);
+    } catch (err) {
+      if (err instanceof FsError) {
+        return {
+          stdout: "",
+          stderr: `bash: ${err.message}\n`,
+          exitCode: 1,
+          env: bash.getEnv(),
+        };
+      }
+      throw err;
+    }
+  };
 
   return {
     bash,

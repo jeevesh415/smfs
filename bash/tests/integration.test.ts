@@ -95,18 +95,21 @@ describe.skipIf(!apiKey)("integration: live container end-to-end", () => {
     }
   }, 60_000);
 
-  it("pwd returns /home/user", { timeout: 30_000 }, async () => {
+  it("pwd returns /", { timeout: 30_000 }, async () => {
     const r = await bash.exec("pwd");
     expect(r.exitCode).toBe(0);
-    expect(r.stdout.trim()).toBe("/home/user");
+    expect(r.stdout.trim()).toBe("/");
   });
 
-  it("ls / lists seeded top-level entries plus synthetic dirs", { timeout: 30_000 }, async () => {
+  it("ls / lists only the seeded top-level entries", { timeout: 30_000 }, async () => {
     const r = await bash.exec("ls /");
     expect(r.exitCode).toBe(0);
     const seen = new Set(r.stdout.split(/\s+/).filter(Boolean));
-    for (const expected of ["dev", "home", "tmp", "journal", "reading", "todo.md", "work"]) {
+    for (const expected of ["journal", "reading", "todo.md", "work"]) {
       expect(seen.has(expected), `expected '${expected}' in 'ls /'`).toBe(true);
+    }
+    for (const unexpected of ["dev", "home", "tmp"]) {
+      expect(seen.has(unexpected), `'${unexpected}' should not appear in 'ls /'`).toBe(false);
     }
   });
 
@@ -273,5 +276,16 @@ describe.skipIf(!apiKey)("integration: live container end-to-end", () => {
     const r = await bash.exec("sgrep 'photosynthesis' /reading/");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("/reading/highlights.txt");
+  });
+
+  it("rejects writing under an existing file with ENOTDIR (no wire call)", {
+    timeout: 30_000,
+  }, async () => {
+    const probe = "/probe-collision.md";
+    const w1 = await bash.exec(`echo first > ${probe}`);
+    expect(w1.exitCode).toBe(0);
+    const w2 = await bash.exec(`echo second > ${probe}/inner.md`);
+    expect(w2.exitCode).toBe(1);
+    expect(w2.stderr).toMatch(/ENOTDIR|Not a directory/);
   });
 });
