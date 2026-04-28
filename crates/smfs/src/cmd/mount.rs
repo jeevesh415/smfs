@@ -291,10 +291,7 @@ fn install_hint_best_effort(tag: &str, mount_path: &std::path::Path, skip_instal
     let canonical = std::fs::canonicalize(mount_path).unwrap_or_else(|_| mount_path.to_path_buf());
     match agent_hint::install(tag, &canonical) {
         Ok(written) if !written.is_empty() => {
-            let names: Vec<String> = written
-                .iter()
-                .map(|p| friendly_path(p))
-                .collect();
+            let names: Vec<String> = written.iter().map(|p| friendly_path(p)).collect();
             eprintln!(
                 "✓ Updated {} (path-scoped semantic-search hint; auto-removed on unmount)",
                 names.join(", "),

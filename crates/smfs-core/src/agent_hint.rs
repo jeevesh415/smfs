@@ -164,8 +164,7 @@ pub fn sweep_orphans(keep_tag: Option<&str>) -> Result<SweepReport> {
 }
 
 fn sweep_one(path: &Path, keep_tag: Option<&str>) -> Result<Vec<String>> {
-    let mut text =
-        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let blocks = find_all_blocks(&text);
     let mut cleaned = Vec::new();
     // Iterate tags discovered in the file; each strip operation is idempotent
@@ -215,16 +214,14 @@ fn write_block(path: &Path, tag: &str, new_block: &str) -> Result<bool> {
         return Ok(false);
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     with_file_lock(path, || atomic_write(path, &updated))?;
     Ok(true)
 }
 
 fn remove_block(path: &Path, tag: &str) -> Result<bool> {
-    let original =
-        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let original = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let stripped = strip_block(&original, tag);
     let final_text = trim_trailing_blank_lines(&stripped);
     if final_text == original {
@@ -327,8 +324,7 @@ where
         None => "smfs.lock".to_string(),
     });
     if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let lock_file = OpenOptions::new()
         .create(true)
@@ -337,12 +333,10 @@ where
         .open(&lock_path)
         .with_context(|| format!("open lock {}", lock_path.display()))?;
 
-    use fs2::FileExt;
-    lock_file
-        .lock_exclusive()
+    fs2::FileExt::lock_exclusive(&lock_file)
         .map_err(|e: io::Error| anyhow::anyhow!("lock {}: {e}", lock_path.display()))?;
     let result = f();
-    let _ = lock_file.unlock();
+    let _ = fs2::FileExt::unlock(&lock_file);
     result
 }
 
