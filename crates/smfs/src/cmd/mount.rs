@@ -339,6 +339,30 @@ fn validate_tag(tag: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn normalize_to_absolute(raw: &std::path::Path) -> anyhow::Result<PathBuf> {
+    if let Ok(p) = std::fs::canonicalize(raw) {
+        return Ok(p);
+    }
+    let base = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("cannot determine current directory")?
+            .join(raw)
+    };
+    let mut normalized = PathBuf::new();
+    for component in base.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => normalized.push(c),
+        }
+    }
+    Ok(normalized)
+}
+
 fn resolve_tag_and_path(
     positional: &str,
     explicit_path: Option<PathBuf>,
@@ -347,30 +371,7 @@ fn resolve_tag_and_path(
         if explicit_path.is_some() {
             anyhow::bail!("cannot use both a path as the tag and --path");
         }
-        let raw = std::path::Path::new(positional);
-        let canon = match std::fs::canonicalize(raw) {
-            Ok(p) => p,
-            Err(_) => {
-                let base = if raw.is_absolute() {
-                    raw.to_path_buf()
-                } else {
-                    std::env::current_dir()
-                        .context("cannot determine current directory")?
-                        .join(raw)
-                };
-                let mut normalized = std::path::PathBuf::new();
-                for component in base.components() {
-                    match component {
-                        std::path::Component::ParentDir => {
-                            normalized.pop();
-                        }
-                        std::path::Component::CurDir => {}
-                        c => normalized.push(c),
-                    }
-                }
-                normalized
-            }
-        };
+        let canon = normalize_to_absolute(std::path::Path::new(positional))?;
         let tag = canon
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -382,7 +383,7 @@ fn resolve_tag_and_path(
     } else {
         validate_tag(positional)?;
         let mount_path = match explicit_path {
-            Some(p) => p,
+            Some(p) => normalize_to_absolute(&p)?,
             None => std::env::current_dir()
                 .context("cannot determine current directory")?
                 .join(positional),
@@ -437,7 +438,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (tag, path) = resolve_tag_and_path("mynotes", Some(tmp.path().to_path_buf())).unwrap();
         assert_eq!(tag, "mynotes");
-        assert_eq!(path, tmp.path());
+        assert_eq!(path, tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_tag_and_path_explicit_relative_path_normalizes_to_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("subdir")).unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let (_, path) = resolve_tag_and_path("mytag", Some(PathBuf::from("subdir"))).unwrap();
+        std::env::set_current_dir(prev).unwrap();
+        assert!(path.is_absolute(), "relative --path must normalize to absolute: {path:?}");
+        assert!(path.ends_with("subdir"));
     }
 
     #[test]
