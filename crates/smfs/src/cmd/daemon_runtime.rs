@@ -154,17 +154,14 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
 
     fs.warm_profile().await;
 
-    // Initial pull is a pull-side op — gated by --no-sync.
-    if !cfg.no_sync {
-        match smfs_core::sync::SyncEngine::initial_pull(&fs).await {
-            Ok((removed, reconciled)) => {
-                eprintln!(
-                    "initial sync: {reconciled} docs reconciled, {removed} stale entries removed"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "initial sync failed; mount will continue");
-            }
+    match smfs_core::sync::SyncEngine::initial_pull(&fs).await {
+        Ok((removed, reconciled)) => {
+            eprintln!(
+                "initial sync: {reconciled} docs reconciled, {removed} stale entries removed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "initial sync failed; mount will continue");
         }
     }
 
@@ -296,10 +293,7 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
     .await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ipc_handle).await;
 
-    // Final deletion scan — pull-side, gated by --no-sync.
-    if !cfg.no_sync {
-        smfs_core::sync::SyncEngine::unmount_scan(&fs).await;
-    }
+    smfs_core::sync::SyncEngine::unmount_scan(&fs).await;
 
     drop(handle);
     #[cfg(unix)]

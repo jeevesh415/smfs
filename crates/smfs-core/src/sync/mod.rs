@@ -32,10 +32,6 @@ use crate::cache::SupermemoryFs;
 pub struct SyncOptions {
     pub delta_interval: Duration,
     pub deletion_scan_interval: Duration,
-    /// When `false`, skip the pull-side loops (A delta pull, C deletion
-    /// scan). Push (D) and inflight status poller (E) always run because
-    /// killing them would stop delivering local writes to Supermemory —
-    /// which defeats the purpose of mounting. Default `true`.
     pub pull_enabled: bool,
 }
 
