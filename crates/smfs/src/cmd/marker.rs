@@ -5,10 +5,7 @@ pub struct SmfsMarker {
 }
 
 pub fn parse_all_markers(content: &str) -> Vec<SmfsMarker> {
-    content
-        .split("\n\n")
-        .filter_map(parse_one_marker)
-        .collect()
+    content.split("\n\n").filter_map(parse_one_marker).collect()
 }
 
 fn parse_one_marker(block: &str) -> Option<SmfsMarker> {
@@ -33,7 +30,10 @@ fn parse_one_marker(block: &str) -> Option<SmfsMarker> {
     })
 }
 
-fn select_for_path<'a>(markers: &'a [SmfsMarker], target: &std::path::Path) -> Option<&'a SmfsMarker> {
+fn select_for_path<'a>(
+    markers: &'a [SmfsMarker],
+    target: &std::path::Path,
+) -> Option<&'a SmfsMarker> {
     markers.iter().find(|m| {
         m.mount_path
             .as_deref()

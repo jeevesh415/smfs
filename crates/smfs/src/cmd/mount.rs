@@ -449,7 +449,10 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
         let (_, path) = resolve_tag_and_path("mytag", Some(PathBuf::from("subdir"))).unwrap();
         std::env::set_current_dir(prev).unwrap();
-        assert!(path.is_absolute(), "relative --path must normalize to absolute: {path:?}");
+        assert!(
+            path.is_absolute(),
+            "relative --path must normalize to absolute: {path:?}"
+        );
         assert!(path.ends_with("subdir"));
     }
 
@@ -477,7 +480,10 @@ mod tests {
     fn resolve_tag_and_path_nonexistent_relative() {
         let (tag, path) = resolve_tag_and_path("./newdir", None).unwrap();
         assert_eq!(tag, "newdir");
-        assert!(path.is_absolute(), "path must be absolute even when dir doesn't exist: {path:?}");
+        assert!(
+            path.is_absolute(),
+            "path must be absolute even when dir doesn't exist: {path:?}"
+        );
     }
 
     #[test]

@@ -96,10 +96,9 @@ fn resolve(target: Option<String>) -> Result<(String, Option<PathBuf>)> {
         if looks_like_path(t) {
             let as_path = PathBuf::from(t);
             let canon = std::fs::canonicalize(&as_path).unwrap_or(as_path);
-            let marker = super::marker::read_smfs_marker_for_path(&canon)
-                .with_context(|| {
-                    format!("no .smfs marker found at or above {}", canon.display())
-                })?;
+            let marker = super::marker::read_smfs_marker_for_path(&canon).with_context(|| {
+                format!("no .smfs marker found at or above {}", canon.display())
+            })?;
             return Ok((marker.tag, Some(canon)));
         }
         return Ok((t.to_string(), None));

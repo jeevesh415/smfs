@@ -76,7 +76,11 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
             let mut entries = parse_all_markers(&existing);
             entries.retain(|m| m.tag != cfg.container_tag);
             entries.push(new_entry);
-            entries.iter().map(format_marker).collect::<Vec<_>>().join("\n")
+            entries
+                .iter()
+                .map(format_marker)
+                .collect::<Vec<_>>()
+                .join("\n")
         } else {
             format_marker(&new_entry)
         };
@@ -313,7 +317,11 @@ pub async fn run(cfg: DaemonConfig) -> Result<()> {
             if remaining.is_empty() {
                 let _ = std::fs::remove_file(&marker_path);
             } else {
-                let out = remaining.iter().map(format_marker).collect::<Vec<_>>().join("\n");
+                let out = remaining
+                    .iter()
+                    .map(format_marker)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let _ = std::fs::write(&marker_path, out);
             }
         } else {
