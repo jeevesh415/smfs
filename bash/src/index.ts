@@ -1,4 +1,4 @@
-export { sgrepCommand } from "./commands/sgrep.js";
+export { sgrepCommand, createSgrepCommand, type SgrepCommandOptions } from "./commands/sgrep.js";
 export {
   type CreateBashOptions,
   type CreateBashResult,

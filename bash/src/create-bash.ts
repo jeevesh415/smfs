@@ -1,7 +1,7 @@
 import type { BashExecResult, BashLogger, BashOptions, ExecOptions } from "just-bash";
 import { Bash } from "just-bash";
 import Supermemory from "supermemory";
-import { sgrepCommand } from "./commands/sgrep.js";
+import { createSgrepCommand } from "./commands/sgrep.js";
 import { FsError } from "./errors.js";
 import { SupermemoryFs } from "./supermemory-fs.js";
 import { TOOL_DESCRIPTION } from "./tool-description.js";
@@ -27,6 +27,12 @@ export interface CreateBashOptions {
    *   0         → no caching
    */
   cacheTtlMs?: number | null;
+  /**
+   * When true, sgrep output includes a `[doc:<uuid>]` annotation per result
+   * so callers can extract the source document IDs from stdout.
+   * Default false — off by default to preserve existing output format.
+   */
+  includeDocIds?: boolean;
 }
 
 export interface CreateBashResult {
@@ -62,7 +68,7 @@ export async function createBash(opts: CreateBashOptions): Promise<CreateBashRes
 
   const bash = new Bash({
     fs,
-    customCommands: [sgrepCommand],
+    customCommands: [createSgrepCommand({ includeDocIds: opts.includeDocIds })],
     cwd: "/",
     env,
     // just-bash's defense-in-depth patches setTimeout, which the Supermemory SDK uses for retries.

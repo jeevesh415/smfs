@@ -1,6 +1,6 @@
 {
   "name": "@supermemory/bash",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Virtual bash environment for AI agents, backed by Supermemory.",
   "license": "MIT",
   "homepage": "https://github.com/supermemoryai/smfs/tree/main/bash#readme",

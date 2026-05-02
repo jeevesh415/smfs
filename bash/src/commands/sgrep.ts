@@ -57,7 +57,7 @@ function escapeForOneLine(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 }
 
-export function formatSgrepOutput(results: SearchResult[]): string {
+export function formatSgrepOutput(results: SearchResult[], includeDocIds = false): string {
   if (results.length === 0) return "";
   const lines: string[] = [];
   for (const r of results) {
@@ -66,36 +66,45 @@ export function formatSgrepOutput(results: SearchResult[]): string {
     if (typeof r.memory === "string" && r.memory.length > 0) content = r.memory;
     else if (typeof r.chunk === "string") content = r.chunk;
     if (content.length === 0) continue;
-    lines.push(`${fp}:${escapeForOneLine(content)}`);
+    const prefix = includeDocIds && r.id ? `${fp} [doc:${r.id}]` : fp;
+    lines.push(`${prefix}:${escapeForOneLine(content)}`);
   }
   return lines.length === 0 ? "" : `${lines.join("\n\n")}\n`;
 }
 
-export const sgrepCommand = defineCommand("sgrep", async (argv, ctx) => {
-  const parsed = parseSgrepArgs(argv);
-  if ("error" in parsed) {
-    return { stdout: "", stderr: `${parsed.error}\n`, exitCode: 2 };
-  }
-  if (parsed.help) {
-    return { stdout: HELP, stderr: "", exitCode: 0 };
-  }
+export interface SgrepCommandOptions {
+  includeDocIds?: boolean;
+}
 
-  const fs = ctx.fs as Partial<SupermemoryFs>;
-  if (!fs.volume) {
-    return {
-      stdout: "",
-      stderr: "sgrep: not a SupermemoryFs (missing volume reference)\n",
-      exitCode: 1,
-    };
-  }
+export function createSgrepCommand(opts: SgrepCommandOptions = {}) {
+  return defineCommand("sgrep", async (argv, ctx) => {
+    const parsed = parseSgrepArgs(argv);
+    if ("error" in parsed) {
+      return { stdout: "", stderr: `${parsed.error}\n`, exitCode: 2 };
+    }
+    if (parsed.help) {
+      return { stdout: HELP, stderr: "", exitCode: 0 };
+    }
 
-  try {
-    const resp = await fs.volume.search({
-      q: parsed.query,
-      ...(parsed.filepath ? { filepath: parsed.filepath } : {}),
-    });
-    return { stdout: formatSgrepOutput(resp.results), stderr: "", exitCode: 0 };
-  } catch (err) {
-    return { stdout: "", stderr: `sgrep: ${(err as Error).message}\n`, exitCode: 1 };
-  }
-});
+    const fs = ctx.fs as Partial<SupermemoryFs>;
+    if (!fs.volume) {
+      return {
+        stdout: "",
+        stderr: "sgrep: not a SupermemoryFs (missing volume reference)\n",
+        exitCode: 1,
+      };
+    }
+
+    try {
+      const resp = await fs.volume.search({
+        q: parsed.query,
+        ...(parsed.filepath ? { filepath: parsed.filepath } : {}),
+      });
+      return { stdout: formatSgrepOutput(resp.results, opts.includeDocIds), stderr: "", exitCode: 0 };
+    } catch (err) {
+      return { stdout: "", stderr: `sgrep: ${(err as Error).message}\n`, exitCode: 1 };
+    }
+  });
+}
+
+export const sgrepCommand = createSgrepCommand();
